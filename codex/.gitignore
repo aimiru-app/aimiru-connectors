@@ -1,0 +1,2 @@
+# Test sandboxes (test/harness.mjs sandboxParent): kept out of every temp folder.
+.test-sandboxes/

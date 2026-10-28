@@ -1,0 +1,185 @@
+{
+  "description": "Aimiru checks each action against your rules before Claude Code runs it, holds it while you have paused, and records what happened.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "2",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/session-start.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"
+            ],
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/watch.mjs"
+            ],
+            "async": true,
+            "timeout": 150,
+            "asyncRewake": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "2",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool-use.mjs"
+            ],
+            "timeout": 3600,
+            "onFailure": "block",
+            "statusMessage": "Checking with Aimiru, or held while you have paused"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-use.mjs"
+            ],
+            "async": true,
+            "timeout": 45
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/watch.mjs"
+            ],
+            "async": true,
+            "timeout": 150,
+            "asyncRewake": true
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-use.mjs"
+            ],
+            "async": true,
+            "timeout": 45
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-use.mjs"
+            ],
+            "async": true,
+            "timeout": 45
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "matcher": "user_settings|project_settings|local_settings",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "2",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/config-change.mjs"
+            ],
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/stop.mjs"
+            ],
+            "async": true,
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/watch.mjs"
+            ],
+            "async": true,
+            "timeout": 900,
+            "asyncRewake": true
+          }
+        ]
+      }
+    ]
+  }
+}

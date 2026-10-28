@@ -1,0 +1,41 @@
+{
+  "name": "aimiru-codex",
+  "version": "0.3.0-rc.1",
+  "description": "Aimiru's check for Codex: Codex's own commands, file changes and tool server calls are checked against your Aimiru rules before they run, and recorded.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Rohit Gajaraj",
+  "homepage": "https://github.com/aimiru-app/aimiru-connectors#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aimiru-app/aimiru-connectors.git",
+    "directory": "codex"
+  },
+  "bugs": {
+    "url": "https://github.com/aimiru-app/aimiru-connectors/issues"
+  },
+  "keywords": [
+    "aimiru",
+    "codex",
+    "agents",
+    "approvals"
+  ],
+  "bin": {
+    "aimiru-codex": "bin/aimiru-codex.mjs"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "tag": "next"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

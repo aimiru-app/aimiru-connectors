@@ -1,0 +1,47 @@
+{
+  "name": "aimiru",
+  "displayName": "Aimiru",
+  "version": "0.3.0-rc.1",
+  "description": "Checks each action Claude Code takes against your limits in Aimiru before it runs, holds its next step while you pause, and records what happened.",
+  "author": {
+    "name": "Rohit Gajaraj"
+  },
+  "homepage": "https://github.com/aimiru-app/aimiru-connectors",
+  "repository": "https://github.com/aimiru-app/aimiru-connectors",
+  "license": "MIT",
+  "keywords": [
+    "aimiru",
+    "rules",
+    "approvals",
+    "agents"
+  ],
+  "userConfig": {
+    "agent_key": {
+      "type": "string",
+      "title": "Aimiru key for Claude Code",
+      "description": "Paste the key you were given, from the demo page or from Aimiru, under Agents, Add an agent, Claude Code. It starts with sayso_agt_. Restart Claude Code after saving it. With an Aimiru account you can leave this empty and run /aimiru:connect instead: you pick a code on your phone and the key never needs copying.",
+      "sensitive": true,
+      "required": false
+    },
+    "sayso_url": {
+      "type": "string",
+      "title": "Aimiru address",
+      "description": "The address shown next to your key in Aimiru, starting with https://, without a slash at the end. When it is empty, /aimiru:connect uses https://aimiru.app.",
+      "required": false
+    }
+  },
+  "mcpServers": {
+    "sayso": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/tool-server.mjs"
+      ],
+      "env": {
+        "SAYSO_PLUGIN_AGENT_KEY": "${user_config.agent_key}",
+        "SAYSO_PLUGIN_URL": "${user_config.sayso_url}",
+        "SAYSO_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
+    }
+  }
+}

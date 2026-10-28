@@ -1,0 +1,15 @@
+{
+  "name": "aimiru",
+  "description": "Aimiru connectors: your rules, checked before your agents act.",
+  "owner": { "name": "Rohit Gajaraj" },
+  "plugins": [
+    {
+      "name": "aimiru",
+      "source": "./claude-code",
+      "description": "Checks each action Claude Code takes against your limits in Aimiru before it runs, holds its next step while you pause, and records what happened.",
+      "version": "0.3.0-rc.1",
+      "license": "MIT",
+      "homepage": "https://github.com/aimiru-app/aimiru-connectors"
+    }
+  ]
+}

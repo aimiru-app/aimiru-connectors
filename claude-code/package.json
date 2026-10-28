@@ -1,0 +1,30 @@
+{
+  "name": "sayso-claude-code",
+  "version": "0.3.0-rc.1",
+  "private": true,
+  "description": "Aimiru for Claude Code: a Claude Code plugin, installed with `claude plugin install` from the aimiru-connectors marketplace, not from npm.",
+  "license": "MIT",
+  "author": "Rohit Gajaraj",
+  "homepage": "https://github.com/aimiru-app/aimiru-connectors/tree/main/claude-code",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aimiru-app/aimiru-connectors.git",
+    "directory": "claude-code"
+  },
+  "type": "module",
+  "files": [
+    ".claude-plugin/",
+    "hooks/",
+    "scripts/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "doctor": "node scripts/doctor.mjs"
+  }
+}
