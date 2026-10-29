@@ -46,7 +46,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ASKS_TRACE_FILE, appendTrace, askHoldMs, isFailClosed, projectOf, quietUntilOf, redactSecrets, sha256Hex, truncate } from './vendor/sayso-client.mjs';
+import { ASKS_TRACE_FILE, appendTrace, askHoldMs, isFailClosed, projectOf, quietUntilOf, redactSecrets, setting, sha256Hex, truncate } from './vendor/sayso-client.mjs';
 import { MESSAGES, clockOf, personSaidNo, waitWords, withName } from './vendor/messages.mjs';
 import { createLocalState, localDecision, localReadsOn, localRecord } from './vendor/local.mjs';
 import { ackOnce, holdCeilingMs, holdWhilePaused, pauseHoldOn, yesBeforeLastPause } from './vendor/pause-watch.mjs';
@@ -596,6 +596,9 @@ async function main() {
             run: runOf(input, projectDir),
             // The project folder Codex works in (ADR-0056): its name and a hash of its full path.
             project: projectOf(projectDir),
+            // The person's job an `aimiru-codex take` run is working on (ADR-0157), so they can
+            // follow its steps live. It changes nothing in how the step is decided.
+            taskId: setting(process.env, 'TASK_ID') ?? null,
           }),
           reporting,
         ]);

@@ -218,11 +218,14 @@ export function isInsideWorkArea(p, ctx) {
  * and .claude.json, Codex's settings and checks in any .codex folder (the home folder's, CODEX_HOME's
  * and a project's, which Codex loads in a trusted project: config.toml, a profile's
  * <name>.config.toml, hooks.json, requirements.toml and the rules folder) and the project's whole
- * .codex folder, Aimiru's own folder (~/.sayso) and its data folders under any Claude Code settings
- * folder (plugins/data/aimiru-...), and what the connector adds in ctx.protectedPaths (its data folder
- * and plugin root, CODEX_HOME, the same files under CLAUDE_CONFIG_DIR: makerProtectedPaths). Changing
- * them can turn Aimiru off, for this agent or for another one on the same computer, so every
- * connector protects every maker's files by name (review of wk/connectors-flow, 28 Oct).
+ * .codex folder, Aimiru's own folder (~/.sayso, which holds the runner's folder too: its copy of
+ * Aimiru, settings, id and process number) and its data folders under any Claude Code settings folder
+ * (plugins/data/aimiru-...), the runner's LaunchAgent (~/Library/LaunchAgents/app.aimiru.runner.plist,
+ * which launchd starts at every login: security review of wk/runner), and what the connector adds in
+ * ctx.protectedPaths (its data folder and plugin root, CODEX_HOME, the same files under
+ * CLAUDE_CONFIG_DIR: makerProtectedPaths). Changing them can turn Aimiru off, for this agent or for
+ * another one on the same computer, so every connector protects every maker's files by name (review
+ * of wk/connectors-flow, 28 Oct).
  */
 export function isProtectedPath(p, ctx) {
   if (!p) return false;
@@ -236,8 +239,13 @@ export function isProtectedPath(p, ctx) {
   if (ctx?.project && isWithin(p, path.join(ctx.project, '.codex'))) return true;
   if (/\/plugins\/data\/(aimiru|sayso)-[^/]*(\/|$)/.test(norm)) return true;
   if (/\/\.sayso\//.test(norm) || /\/\.sayso$/.test(norm)) return true;
+  if (RUNNER_PLIST_RE.test(norm)) return true;
   return (ctx?.protectedPaths || []).some((pp) => pp && isWithin(p, path.resolve(pp)));
 }
+
+/** The runner's LaunchAgent (shared/runner.mjs launchAgentFile), by name. */
+const RUNNER_PLIST = 'app.aimiru.runner.plist';
+const RUNNER_PLIST_RE = /\/Library\/LaunchAgents\/app\.aimiru\.runner\.plist$/;
 
 /** Claude Code's own files in a settings folder of its own, guarded as ~/.claude's are by name. */
 const CLAUDE_CONFIG_FILES = Object.freeze(['settings.json', 'settings.local.json', '.claude.json', 'plugins']);
@@ -284,7 +292,7 @@ const MANAGED_SETTINGS_DIRS = Object.freeze(['/Library/Application Support/Claud
 /** The protected files and folders a folder may hold, by where they are on this computer. */
 function protectedLocations(ctx) {
   const home = ctx?.home || os.homedir();
-  const at = [path.join(home, '.claude', 'settings.json'), path.join(home, '.claude', 'settings.local.json'), path.join(home, '.claude', 'plugins'), path.join(home, '.claude.json'), path.join(home, '.sayso')];
+  const at = [path.join(home, '.claude', 'settings.json'), path.join(home, '.claude', 'settings.local.json'), path.join(home, '.claude', 'plugins'), path.join(home, '.claude.json'), path.join(home, '.sayso'), path.join(home, 'Library', 'LaunchAgents', RUNNER_PLIST)];
   // Codex's settings and checks in the home folder, and the project's whole .codex folder.
   for (const name of ['config.toml', 'hooks.json', 'requirements.toml', 'rules']) at.push(path.join(home, '.codex', name));
   if (ctx?.project) at.push(path.join(ctx.project, '.claude', 'settings.json'), path.join(ctx.project, '.claude', 'settings.local.json'), path.join(ctx.project, '.codex'));
@@ -376,7 +384,7 @@ function isFolder(p) {
 /** True when free text (inline program code) names one of the protected files or folders. */
 export function mentionsProtectedPath(text, ctx) {
   const t = String(text ?? '').replace(/\\\\?/g, '/');
-  if (/\.claude\/settings(\.local)?\.json|managed-settings|\.claude\/plugins|\.claude\.json|(^|[\s'"`/])\.sayso([/'"`\s]|$)/.test(t)) return true;
+  if (/\.claude\/settings(\.local)?\.json|managed-settings|\.claude\/plugins|\.claude\.json|(^|[\s'"`/])\.sayso([/'"`\s]|$)|app\.aimiru\.runner\.plist/.test(t)) return true;
   // Codex's settings and checks in any .codex folder, a .codex folder named from where the code
   // runs (the project's), and Aimiru's data under any Claude Code settings folder (isProtectedPath).
   if (/\.codex\/(([^/'"`\s]+\.)?config\.toml|hooks\.json|requirements\.toml|rules)|(^|[\s'"`])\.codex\/|plugins\/data\/(aimiru|sayso)-/.test(t)) return true;
@@ -6245,7 +6253,14 @@ function classifySegment(seg, ctx, out, depth) {
     const sub = firstNonFlag(args);
     if (prog === 'crontab' && args.includes('-r')) out.classes.push('delete');
     else if (prog === 'defaults' && !/^(write|delete|import|rename)$/.test(sub)) out.classes.push('read');
-    else if (prog === 'launchctl' && /^(list|print|blame)$/.test(sub)) out.classes.push('read');
+    else if (prog === 'launchctl' && /^(list|print|blame|getenv)$/.test(sub)) out.classes.push('read');
+    // What launchd hands every program it starts at login, Aimiru's runner among them: a setting
+    // there can turn Claude Code's checks off (CLAUDE_CODE_SIMPLE, CLAUDE_CODE_SAFE_MODE), load code
+    // into the check (NODE_OPTIONS) or point it elsewhere (security review of wk/runner).
+    else if (prog === 'launchctl' && /^(setenv|config)$/.test(sub)) {
+      out.classes.push('write');
+      protectedChange(out, `changes what every program started at login gets with launchctl ${sub}, which can turn Aimiru's check off`);
+    }
     else if (prog === 'systemctl' && /^(status|show|list-units|is-active|cat)$/.test(sub)) out.classes.push('read');
     else if (prog === 'crontab' && args.includes('-l')) out.classes.push('read');
     else {

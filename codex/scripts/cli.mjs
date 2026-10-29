@@ -1,7 +1,15 @@
-// Command line for Aimiru's check for Codex (ADR-0091):
+// Command line for Aimiru's check for Codex (ADR-0091, ADR-0157):
 //   aimiru-codex init [--aimiru-url <address>] [--paste-key] [--email <your Aimiru email>] [--wait <seconds>]
 //   aimiru-codex doctor [--json]
+//   aimiru-codex take [--watch] [--dir <folder>]
+//   aimiru-codex remember "<one plain line>" [--topic <topic>] [--how <noticed|instructions>]
+//   aimiru-codex import [--send [--leave-out 2 5] | --none]
 //   aimiru-codex uninstall
+//
+// take: Codex takes the next job the person gave it in Aimiru and runs it with codex exec in the folder
+// (lib/take.mjs). remember: Codex suggests one line about the person for Aimiru to keep (lib/remember.mjs).
+// import: what Codex's own AGENTS.md files say about the person, shown, then sent as the person
+// chooses (lib/import.mjs, ADR-0162); init asks about it once.
 //
 // init: gets a key (AIMIRU_AGENT_TOKEN or SAYSO_AGENT_TOKEN, a hidden prompt with --paste-key, or pairing by code), saves
 // it owner-only in ~/.sayso/codex, copies the check to ~/.sayso/codex/app, adds it to Codex's
@@ -40,21 +48,25 @@ import {
   AGENT_LABEL,
   CODEX_TIMEOUT_S,
   CONNECTOR,
-  COVERS,
   PACKAGE_NAME,
   PAUSE_HOLDS,
   UNDO_LINE,
   VERSION,
   codexHomeOf,
   dataDirOf,
+  installReport,
   keyFilePath,
   loadSettings,
   makeClient,
   ranSinceInstall,
   stateStore,
 } from './lib/runtime.mjs';
-import { appDirOf, codexSettingsFacts, commandPaths, copyApp, findOurHook, hookKeyOf, installHook, stableNodePath, uninstallHook } from './lib/install.mjs';
-import { WORDS } from './lib/words.mjs';
+import { appDirOf, codexSettingsFacts, commandPaths, copyApp, entryTrust, findOurBrief, findOurHook, hookKeyOf, installHook, isOurExactBrief, isOurExactCheck, stableNodePath, uninstallHook } from './lib/install.mjs';
+import { remember, REMEMBER_TOPICS } from './lib/remember.mjs';
+import { importLines, offerImport } from './lib/import.mjs';
+import { take } from './lib/take.mjs';
+import { JOB_WORDS, WORDS } from './lib/words.mjs';
+import { codexRunner } from './runner.mjs';
 
 const KEY_RE = /^sayso_agt_[A-Za-z0-9_-]{43}$/;
 /**
@@ -68,8 +80,8 @@ export const DEFAULT_ADDRESS = 'https://aimiru.app';
 const PENDING_FILE = 'pairing.json';
 /** How often init says it is still waiting for the person. */
 const REMIND_EVERY_MS = 60_000;
-/** What the person runs again to keep waiting on the same code. */
-const INIT_AGAIN = `npx ${PACKAGE_NAME}@next init`;
+/** What the person runs again to keep waiting on the same code: no tag and no version (Rohit, 29 Oct 23:50). */
+const INIT_AGAIN = `npx ${PACKAGE_NAME} init`;
 
 const HELP = `${PACKAGE_NAME} ${VERSION}: Aimiru's check for Codex
 
@@ -81,12 +93,29 @@ Usage:
       --email <your Aimiru email>      the request to connect also reaches your phone
       --wait <seconds>                 how long to wait for you to connect it (at most 10 minutes)
   ${PACKAGE_NAME} doctor [--json]      check that everything works
-  ${PACKAGE_NAME} uninstall            take Aimiru's check out of Codex
+  ${PACKAGE_NAME} take                 run the next job you gave Codex in Aimiru, in this folder
+      --watch                          keep looking every 30 seconds, until Ctrl+C
+      --dir <folder>                   run it in that folder instead
+  ${PACKAGE_NAME} runner on            start the jobs you give your agents in Aimiru as you send
+                                       them, in this folder, and keep doing it after a restart
+      --dir <folder>                   in that folder instead
+      --name <name>                    what Aimiru calls this computer (else MacBook, Mac or PC)
+  ${PACKAGE_NAME} runner off|status    turn it off here, or say how it stands
+  ${PACKAGE_NAME} remember "<line>"    suggest one line about you for Aimiru to keep
+      --topic <topic>                  one of ${REMEMBER_TOPICS.join(', ')}
+      --how <how>                      noticed (in this work) or instructions (Codex's own)
+  ${PACKAGE_NAME} import               bring in what your AGENTS.md files say about you, as you choose
+      --send [--leave-out 2 5]         send the lines shown, or all but those numbers
+      --none                           send none, and forget the lines shown
+  ${PACKAGE_NAME} uninstall            take Aimiru's check and brief out of Codex
 
-After init, open Codex, type /hooks and trust "Checking with Aimiru".`;
+After init, open Codex, type /hooks and trust "Checking with Aimiru" and "Aimiru's brief".`;
+
+/** Flags that take no value: the word after one is never read as its value. */
+const SWITCHES = new Set(['watch', 'json', 'pasteKey', 'help', 'version', 'send', 'none']);
 
 export function parseArgs(argv) {
-  const out = { command: 'help', flags: {} };
+  const out = { command: 'help', flags: {}, args: [] };
   const rest = [...argv];
   if (rest[0] && !rest[0].startsWith('-')) out.command = rest.shift();
   for (let i = 0; i < rest.length; i += 1) {
@@ -97,9 +126,9 @@ export function parseArgs(argv) {
       const [k, v] = a.slice(2).split('=', 2);
       const key = k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       if (v !== undefined) out.flags[key] = v;
-      else if (rest[i + 1] !== undefined && !rest[i + 1].startsWith('--')) out.flags[key] = rest[++i];
+      else if (!SWITCHES.has(key) && rest[i + 1] !== undefined && !rest[i + 1].startsWith('--')) out.flags[key] = rest[++i];
       else out.flags[key] = true;
-    }
+    } else out.args.push(a);
   }
   return out;
 }
@@ -146,25 +175,8 @@ export function codexVersion(env = process.env, { timeoutMs = 3_000 } = {}) {
   }
 }
 
-/** The report init sends: installed, and waiting for the person to trust it in Codex. */
-export function installReport({ codexVersion: cv = null, source = 'unknown', checksOff = false } = {}) {
-  return {
-    connector: CONNECTOR,
-    version: VERSION,
-    client_version: cv,
-    install_source: source,
-    environment: {
-      step: 'install',
-      // Codex skips a new or changed check until the person trusts it: not run yet.
-      hook_ran: false,
-      hooks_enabled: !checksOff,
-      on_failure_block: true,
-      covers: [...COVERS],
-      platform: process.platform,
-      node: process.versions.node,
-    },
-  };
-}
+/** The report init sends: installed, and waiting for the person to trust it in Codex (lib/runtime.mjs). */
+export { installReport };
 
 /**
  * The address init connects to: --aimiru-url; the request an init before this one kept, while it is
@@ -322,9 +334,13 @@ export async function init(o = {}) {
     print(WORDS.noKey);
   }
 
+  // Asked once (ADR-0162): bring in what Codex already knows about the person.
+  if (key) await offerImport({ env, print, ...(o.importAsk ? { ask: o.importAsk } : {}), ...(o.projectDir ? { projectDir: o.projectDir } : {}) });
+
   print('');
   print(WORDS.trustTitle);
   print(WORDS.trustStep('/hooks'));
+  print(JOB_WORDS.trustBrief('/hooks'));
   print(WORDS.trustThen);
   print(WORDS.limit);
   return failed || !key ? 1 : 0;
@@ -365,7 +381,7 @@ export async function doctor(o = {}) {
     // runs again (agent-experience review of wk/connectors-flow).
     const holds = pauseHoldOn(env, PAUSE_HOLDS);
     const hourOk = Number(hook.timeout) >= CODEX_TIMEOUT_S;
-    add('pause_hold', !holds || hourOk, !holds ? MESSAGES.holdOffLine(AGENT_LABEL) : hourOk ? MESSAGES.holdOnLine(AGENT_LABEL) : WORDS.doctorOldEntry(`npx ${PACKAGE_NAME}@next init`, '/hooks'));
+    add('pause_hold', !holds || hourOk, !holds ? MESSAGES.holdOffLine(AGENT_LABEL) : hourOk ? MESSAGES.holdOnLine(AGENT_LABEL) : WORDS.doctorOldEntry(INIT_AGAIN, '/hooks'));
     // Codex keys trust to the entry's place (<hooks.json>:pre_tool_use:<group>:<handler>): an entry
     // added before Aimiru's moves it, and Codex then skips it silently until it is trusted again.
     // The place is the one the last run inside Codex recorded; before any, nothing was trusted yet.
@@ -373,8 +389,26 @@ export async function doctor(o = {}) {
       const same = status.group_index === hook.groupIndex && (status.handler_index ?? 0) === hook.handlerIndex;
       add('position', same, WORDS.doctorMoved(same));
     }
+    // Whether Codex trusts the check where it is now, from Codex's own files (ADR-0157).
+    // Only the entry exactly as install writes it counts (security review); anything unreadable is not trusted.
+    const trust = entryTrust({ codexHome: settings.codexHome, at: hook, event: 'PreToolUse' });
+    if (!isOurExactCheck(hook, appDir)) add('check_trusted', false, JOB_WORDS.checkChanged('/hooks'));
+    else if (trust.state === 'trusted') add('check_trusted', true, JOB_WORDS.checkTrusted);
+    else if (trust.state === 'untrusted') add('check_trusted', false, JOB_WORDS.checkUntrusted('/hooks'));
+    else if (trust.state === 'changed') add('check_trusted', false, JOB_WORDS.checkChanged('/hooks'));
+    else add('check_trusted', false, JOB_WORDS.trustUnknown);
   }
   add('ran', ran, WORDS.doctorRan(ran));
+  // The person's brief at session start (ADR-0157): in Codex's settings, trusted, and on.
+  const brief = findOurBrief({ codexHome: settings.codexHome, appDir });
+  const briefTrust = entryTrust({ codexHome: settings.codexHome, at: brief, event: 'SessionStart' });
+  if (!brief.present) add('brief', false, JOB_WORDS.briefMissing);
+  else if (!isOurExactBrief(brief, appDir)) add('brief', false, JOB_WORDS.briefChanged('/hooks'));
+  else if (briefTrust.off) add('brief', false, JOB_WORDS.briefOff);
+  else if (briefTrust.state === 'trusted') add('brief', true, JOB_WORDS.briefTrusted);
+  else if (briefTrust.state === 'changed') add('brief', false, JOB_WORDS.briefChanged('/hooks'));
+  else if (briefTrust.state === 'unknown') add('brief', false, JOB_WORDS.trustUnknown);
+  else add('brief', false, JOB_WORDS.briefUntrusted('/hooks'));
   // How an ask holds a step (ADR-0145), as Claude Code's doctor says it.
   add('ask_hold', true, MESSAGES.waitHold);
   if (o.json) print(JSON.stringify({ connector: CONNECTOR, version: VERSION, checks: checks.map(({ check, ok }) => ({ check, ok })), tier: status.tier ?? null }, null, 2));
@@ -394,7 +428,7 @@ export async function uninstall(o = {}) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const { command, flags } = parseArgs(argv);
+  const { command, flags, args } = parseArgs(argv);
   if (command === 'help') {
     process.stdout.write(`${HELP}\n`);
     return 0;
@@ -428,6 +462,31 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
   if (command === 'doctor') return doctor({ json: flags.json === true });
+  if (command === 'take') {
+    // Ctrl+C (or a time limit, or the terminal closing) ends a wait at once, and a run once Codex has
+    // stopped and the job is recorded. A second signal ends it at once.
+    const stopper = new AbortController();
+    const onSignal = () => {
+      if (stopper.signal.aborted) process.exit(130);
+      stopper.abort();
+    };
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+    for (const s of signals) process.on(s, onSignal);
+    try {
+      return await take({ watch: flags.watch === true, dir: typeof flags.dir === 'string' ? flags.dir : null, stop: stopper.signal });
+    } finally {
+      for (const s of signals) process.off(s, onSignal);
+    }
+  }
+  // The runner (ADR-0161): on, off, status, and run (what its LaunchAgent starts). Its own flags.
+  if (command === 'runner') return codexRunner(argv.slice(1));
+  if (command === 'remember') {
+    return remember({ line: args.join(' '), topic: typeof flags.topic === 'string' ? flags.topic : null, how: typeof flags.how === 'string' ? flags.how : null });
+  }
+  if (command === 'import') {
+    const leaveOut = [typeof flags.leaveOut === 'string' ? flags.leaveOut : '', ...args].join(' ').trim();
+    return importLines({ send: flags.send === true, none: flags.none === true, leaveOut });
+  }
   if (command === 'uninstall') return uninstall();
   process.stderr.write(`Unknown command "${command}".\n\n${HELP}\n`);
   return 2;

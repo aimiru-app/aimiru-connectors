@@ -42,6 +42,7 @@ import {
   writePendingPairing,
 } from './vendor/pair.mjs';
 import { normaliseBaseUrl, setting } from './vendor/sayso-client.mjs';
+import { describeAsk, markAsked, readImportState } from './vendor/import-lines.mjs';
 
 const PENDING_FILE = 'pairing.json';
 /** Aimiru's own address: where connect pairs when nothing names another (Mac run part 1, item 1). */
@@ -89,6 +90,26 @@ export function addressOf({ args, env, settings, pending, now = Date.now() }) {
   return env.CLAUDE_PLUGIN_OPTION_SAYSO_URL || savedPluginOption(env, 'sayso_url') || setting(env, 'BASE_URL') || setting(env, 'URL') || settings.baseUrl || DEFAULT_ADDRESS;
 }
 
+/**
+ * Asks once (ADR-0162, point 2): bring in what Claude Code already knows about the person? It lists
+ * the files the import would read that are on this computer, reads none of them, and says the
+ * answer is typing /aimiru:import. Never asked again, and never when none of the files is here.
+ */
+export function offerImport({ dataDir, env, say }) {
+  try {
+    if (readImportState(dataDir).asked) return false;
+    const lines = describeAsk({ agent: 'claude-code', label: AGENT_LABEL, command: '/aimiru:import', env, projectDir: env.CLAUDE_PROJECT_DIR || process.cwd() });
+    if (lines.length === 0) return false;
+    say('');
+    for (const l of lines) say(l);
+    markAsked(dataDir);
+    return true;
+  } catch {
+    // The question can wait for the next connect; the connection is made.
+    return false;
+  }
+}
+
 /** Resolves 'stopped' once `stop` fires; never, when there is no stop. */
 function stopped(stop) {
   if (!stop) return new Promise(() => {});
@@ -120,6 +141,7 @@ export async function connect({ argv = process.argv.slice(2), env = process.env,
       const me = await client.me();
       if (me.ok) {
         say(`Aimiru for Claude Code is already connected as ${me.data?.agent?.name || AGENT_LABEL}. To connect it as a new agent, run /aimiru:connect --again.`);
+        offerImport({ dataDir: settings.dataDir, env, say });
         return 0;
       }
     }
@@ -182,6 +204,7 @@ export async function connect({ argv = process.argv.slice(2), env = process.env,
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
   });
   if ((await Promise.race([practice, stopped(stop)])) === 'stopped') say(PAIR_MESSAGES.practiceWaiting);
+  offerImport({ dataDir: settings.dataDir, env, say });
   return 0;
 }
 

@@ -593,6 +593,9 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
       // The project or client folder Claude Code works in (ADR-0056): its name, or AIMIRU_PROJECT (or SAYSO_PROJECT),
       // and a hash of its full path worked out here, so the person's rules can name the project.
       project: projectOf(settings.projectDir || input.cwd),
+      // The person's job this session took at its start, so they can follow its steps live
+      // (ADR-0157). It changes nothing in how the step is decided.
+      taskId: store.sessionTask(input.session_id),
     });
     // A remembered pause answered because Aimiru could not: Aimiru is down too.
     if (d.reason === 'unreachable' || d.reason === 'bad_response' || d.remembered) store.markDown(DOWN_WINDOW_MS);

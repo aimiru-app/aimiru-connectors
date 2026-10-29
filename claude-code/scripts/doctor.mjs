@@ -27,6 +27,7 @@ import {
   makeClient,
   skillVersion,
   stateStore,
+  takesJobsHere,
 } from './lib/runtime.mjs';
 import { PAUSE_TRACE_FILE, createSpool, isDemoEnded, readTrace } from './vendor/sayso-client.mjs';
 import { CLAUDE_CODE_CONNECT, MESSAGES, clockOf, reachFinding, tierWord } from './vendor/messages.mjs';
@@ -157,6 +158,14 @@ async function main() {
   // the door to it for every agent (ADR-0141), so the computer's own setting turns nothing on, and the
   // doctor never offers it (agent-experience and devrel review of wk/connectors-flow).
   note('tasks', 'Work handed between agents is off for now.');
+
+  // 7b. The jobs the person gives Claude Code, and their brief (ADR-0157): this computer's setting,
+  // then what Aimiru answered the last session. Never "read": Aimiru gave the brief.
+  if (!takesJobsHere()) note('jobs', MESSAGES.jobsOff(AGENT_LABEL));
+  else if (last?.jobs === 'not_open') note('jobs', MESSAGES.jobsNotOpen(AGENT_LABEL));
+  else note('jobs', MESSAGES.jobsOn(AGENT_LABEL));
+  // A brief the start missed and the person's message brought (CC6) says so.
+  if (last?.brief?.state === 'given') note('brief', last.brief.at_prompt === true ? MESSAGES.briefGivenAtPrompt(AGENT_LABEL) : MESSAGES.briefGiven(AGENT_LABEL));
 
   // 8. Waiting records
   const waiting = createSpool(settings.dataDir).size();

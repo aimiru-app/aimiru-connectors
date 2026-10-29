@@ -26,6 +26,17 @@ function summaryFor(description, event, input, call) {
   return truncate(`${s}.`, 280);
 }
 
+/**
+ * True when this call of Aimiru's own record tool finished a job: outcome completed or failed with a
+ * task_id, and Aimiru did not answer it with an error.
+ */
+function endsSessionJob(input) {
+  if (!String(input.tool_name).endsWith('__record') || typeof input.session_id !== 'string' || !input.session_id) return false;
+  const ti = input.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {};
+  if (typeof ti.task_id !== 'string' || !ti.task_id || !['completed', 'failed'].includes(ti.outcome)) return false;
+  return input.tool_response?.isError !== true;
+}
+
 /** The order id in a checkout's output: the store's order.id, or Link's lsrq_ request id. */
 function orderIdOf(input, checkout) {
   try {
@@ -44,7 +55,16 @@ async function main() {
     return;
   }
   const event = input?.hook_event_name || 'PostToolUse';
-  if (!input?.tool_name || isSaysoTool(input.tool_name, input.mcp_server)) return;
+  if (!input?.tool_name) return;
+  if (isSaysoTool(input.tool_name, input.mcp_server)) {
+    // Claude recorded the session's job done or not done with Aimiru's own record tool (ADR-0157):
+    // the session's later steps no longer name that job. Aimiru's own tools are never recorded here.
+    if (event === 'PostToolUse' && endsSessionJob(input)) {
+      const settings = loadSettings();
+      stateStore(settings.dataDir, { secret: settings.token }).clearSessionTask(input.session_id, input.tool_input.task_id);
+    }
+    return;
+  }
 
   const settings = loadSettings();
   const store = stateStore(settings.dataDir, { secret: settings.token });

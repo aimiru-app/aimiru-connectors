@@ -10,7 +10,7 @@ import { createPauseWatch } from '../vendor/pause-watch.mjs';
 import { ASK_HOLD_MS, createSaysoClient, setting, sha256Hex } from '../vendor/sayso-client.mjs';
 
 export const CONNECTOR = 'codex';
-export const VERSION = '0.3.0-rc.1';
+export const VERSION = '0.3.0-rc.2';
 /** The npm package (ADR-0091): unscoped, a command people run with npx, like aimiru-mcp-proxy. */
 export const PACKAGE_NAME = 'aimiru-codex';
 /** The line that removes the check (wave 10, shapes 3), word for word as the demo page and the README show it. */
@@ -667,6 +667,37 @@ export function lastInstallAt(status) {
 export function ranSinceInstall(status) {
   const at = Date.parse(status?.hook_reported_at ?? '');
   return Number.isFinite(at) && !(lastInstallAt(status) >= at);
+}
+
+/**
+ * The report init sends: installed, waiting for the person to trust it in Codex (Advised until the
+ * check runs inside Codex). The brief entry sends the same when init's never reached Aimiru (ADR-0157),
+ * so a report names Codex's own connector and its version before the first brief.
+ */
+export function installReport({ codexVersion: cv = null, source = 'unknown', checksOff = false } = {}) {
+  return {
+    connector: CONNECTOR,
+    version: VERSION,
+    client_version: cv,
+    install_source: source,
+    environment: {
+      step: 'install',
+      // Codex skips a new or changed check until the person trusts it: not run yet.
+      hook_ran: false,
+      hooks_enabled: !checksOff,
+      on_failure_block: true,
+      covers: [...COVERS],
+      platform: process.platform,
+      node: process.versions.node,
+    },
+  };
+}
+
+/** True once a report reached Aimiru since init last ran here: init's own, or the check's (ADR-0157). */
+export function reportedSinceInstall(status) {
+  const installed = Date.parse(status?.installed_at ?? '');
+  if (!Number.isFinite(installed)) return true;
+  return [status?.install_reported_at, status?.hook_reported_at].some((t) => Date.parse(t ?? '') >= installed);
 }
 
 /** The report a check that ran inside Codex sends: Aimiru reads the tier from these facts. */

@@ -7,7 +7,7 @@
       "name": "aimiru",
       "source": "./claude-code",
       "description": "Checks each action Claude Code takes against your limits in Aimiru before it runs, holds its next step while you pause, and records what happened.",
-      "version": "0.3.0-rc.1",
+      "version": "0.3.0-rc.2",
       "license": "MIT",
       "homepage": "https://github.com/aimiru-app/aimiru-connectors"
     }

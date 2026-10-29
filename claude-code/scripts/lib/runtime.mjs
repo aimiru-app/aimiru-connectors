@@ -11,14 +11,56 @@ import { createLocalState, refreshLocal } from '../vendor/local.mjs';
 import { readKeyFile } from '../vendor/pair.mjs';
 import { createPauseWatch } from '../vendor/pause-watch.mjs';
 import { readSkillVersion } from '../vendor/routine.mjs';
-import { ASK_HOLD_MS, createSaysoClient, installSource, setting, sha256Hex } from '../vendor/sayso-client.mjs';
+import { ASK_HOLD_MS, createPauseMemory, createSaysoClient, installSource, setting, sha256Hex } from '../vendor/sayso-client.mjs';
 import { CLAUDE_CODE_CONNECT } from '../vendor/messages.mjs';
 
 export const CONNECTOR = 'claude-code';
-export const VERSION = '0.3.0-rc.1';
+export const VERSION = '0.3.0-rc.2';
 /** onFailure: "block" makes a failed or timed-out check block the call (Claude Code 2.1.295, CHANGELOG). */
 export const MIN_ENFORCED_VERSION = '2.1.295';
 export const AGENT_LABEL = 'Claude Code';
+
+/**
+ * The most one hook's context for Claude may hold (code.claude.com/docs/en/hooks, read 29 Oct 2026):
+ * over 10,000 characters, Claude Code saves it to a file and gives Claude the file's path and a
+ * 2,000-character preview instead, without asking Claude to read the file. So a context stays within
+ * it, and the person's brief is what gives way (ADR-0157, quality review).
+ */
+export const CONTEXT_MAX_CHARS = 10_000;
+
+/**
+ * A context for Claude from its parts, in order, with the person's brief only when the whole stays
+ * within CONTEXT_MAX_CHARS: a brief that does not fit is left out whole, never cut, and the rest (the
+ * job, a late yes) goes as before. withBrief(true) and withBrief(false) build the two; {text, brief}
+ * says which was used.
+ */
+export function fitContext(withBrief) {
+  const full = withBrief(true);
+  if (full.length <= CONTEXT_MAX_CHARS) return { text: full, brief: true };
+  return { text: withBrief(false), brief: false };
+}
+
+/**
+ * Whether a GET /v1/brief at session start missed (CC6): no answer in time, no connection, a server
+ * error, or an answer from something on the way rather than Aimiru. Then the session's first prompt
+ * asks once more (user-prompt-submit.mjs). Aimiru's own answers are no miss: a brief, an empty one,
+ * 403 and 404 (not open to this agent), 423 (paused), 401, or a malformed brief.
+ */
+export function briefMissed(r) {
+  if (!r || typeof r !== 'object') return true;
+  if (r.ok) return false;
+  if (r.kind === 'timeout' || r.kind === 'network') return true;
+  return r.kind === 'http' && (r.fromSayso === false || r.status >= 500);
+}
+
+/** Whether this computer holds the person's Pause for this agent now (the last word Aimiru gave, ADR-0022). */
+export function pausedHere(settings) {
+  try {
+    return createPauseMemory(settings.dataDir).get()?.paused === true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Where this plugin was installed from, for the heartbeat (ADR-0041): the Claude Code plugin
@@ -216,6 +258,41 @@ export const DOWN_WINDOW_MS = 30_000;
  */
 export function takesTasksHere(env = process.env) {
   return String(setting(env, 'TAKE_TASKS') ?? '').trim() === '1';
+}
+
+/**
+ * True unless the person turned job taking off on this computer (ADR-0157): AIMIRU_TAKE_TASKS (or
+ * SAYSO_TAKE_TASKS) unset, or 1. A session the person starts in their own terminal then takes the job
+ * they gave Claude Code in Aimiru, when Aimiru gives it one (Aimiru decides: its door, the person's
+ * grant for this agent, and this connector's version); any other value turns that off. Whether Claude
+ * may call take_task itself is still takesTasksHere above, unchanged.
+ */
+export function takesJobsHere(env = process.env) {
+  const v = String(setting(env, 'TAKE_TASKS') ?? '').trim();
+  return v === '' || v === '1';
+}
+
+/**
+ * A job this session holds, as get_task gives it back (CONTRACT.md), in the shape the task context
+ * reads, while it is still open; null when it ended, cannot be read, or (unless work handed between
+ * agents is on here) is not the person's own (ADR-0157).
+ */
+export function openTaskOf(r, handOffsHere) {
+  const t = r?.ok && r.data?.task && typeof r.data.task === 'object' ? r.data.task : null;
+  if (!t || ['completed', 'failed', 'cancelled'].includes(t.status) || (t.role && t.role !== 'taking')) return null;
+  const fromPerson = t.from?.person === true;
+  if (!fromPerson && !handOffsHere) return null;
+  return {
+    id: t.id,
+    description: t.description,
+    class: t.class,
+    amount_cap: t.amount_cap ?? null,
+    currency: t.currency ?? null,
+    context: {},
+    withheld: Array.isArray(t.withheld) ? t.withheld : [],
+    from_person: fromPerson,
+    from_agent: fromPerson ? null : typeof t.from?.agent === 'string' ? t.from.agent : null,
+  };
 }
 
 /** A positive number setting (AIMIRU_<name>, or SAYSO_<name>), else the fallback. */
@@ -533,6 +610,14 @@ function sessionMac(secret, session, baseline) {
 export const SESSION_BASELINE_TTL_MS = 14 * 24 * 3600_000;
 
 /**
+ * A MAC over the job a session took (ADR-0157), keyed by the Aimiru key, so nothing else can make a
+ * session's checks name another job.
+ */
+function sessionTaskMac(secret, session, taskId, ts) {
+  return createHmac('sha256', `sayso-session-task:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${String(taskId ?? '')}\n${ts}`).digest('hex');
+}
+
+/**
  * A MAC over a program the person allowed in a session (ADR-0090): the session, the file and the
  * sha256 of its content, keyed by the Aimiru key. A file written into this folder by anything else
  * does not verify, so nothing but the person's own yes lets that file run as local work.
@@ -580,9 +665,98 @@ export function stateStore(dataDir, { secret = '' } = {}) {
   const programFile = (session, file) => path.join(programsDir, `${sha256Hex(`program:${String(session ?? '')}\u0000${String(file ?? '')}`).slice(0, 40)}.json`);
   const healthFile = path.join(dataDir, 'health.json');
   const statusFile = path.join(dataDir, 'status.json');
+  // Per session (ADR-0157): the brief it was given (its version, never its words), and the job it took.
+  const briefsDir = path.join(dataDir, 'briefs');
+  const briefFile = (session) => path.join(briefsDir, `${sha256Hex(`brief:${String(session ?? '')}`).slice(0, 40)}.json`);
+  const sessionTasksDir = path.join(dataDir, 'session-tasks');
+  const sessionTaskFile = (session) => path.join(sessionTasksDir, `${sha256Hex(`task:${String(session ?? '')}`).slice(0, 40)}.json`);
+  // A session /clear emptied while it held an open job: given again at its next prompt (ADR-0157).
+  const regiveFile = (session) => path.join(sessionTasksDir, `${sha256Hex(`regive:${String(session ?? '')}`).slice(0, 40)}.flag`);
 
   return {
     dataDir,
+    /**
+     * What this session was given of the person's brief (ADR-0157): {state, version, at}, state as
+     * briefOf says (given, empty, closed or none) and at when Aimiru was last asked. Never the words.
+     * missed: the start asked and had no answer from Aimiru (briefMissed), so the first prompt asks at
+     * once (CC6); caught_up: that first-prompt ask is spent, and stays spent for the whole session.
+     */
+    putSessionBrief(session, data) {
+      if (!session || !data || typeof data !== 'object') return;
+      try {
+        const caughtUp = data.caught_up === true || readJsonFile(briefFile(session))?.caught_up === true;
+        writeJsonFile(briefFile(session), {
+          session: String(session),
+          state: String(data.state ?? 'none'),
+          version: typeof data.version === 'string' ? data.version : null,
+          at: Number(data.at) || Date.now(),
+          ...(data.missed === true ? { missed: true } : {}),
+          ...(caughtUp ? { caught_up: true } : {}),
+        });
+      } catch {
+        // the next prompt does not look again; the next session start does
+      }
+    },
+    sessionBrief(session) {
+      if (!session) return null;
+      const v = readJsonFile(briefFile(session));
+      return v && v.session === String(session) ? v : null;
+    },
+    /** The job this session took at its start (ADR-0157): its checks carry the job's id until it ends. */
+    putSessionTask(session, taskId) {
+      if (!secret || !session || typeof taskId !== 'string' || !taskId) return;
+      const ts = Date.now();
+      try {
+        writeJsonFile(sessionTaskFile(session), { session: String(session), task_id: taskId, ts, mac: sessionTaskMac(secret, session, taskId, ts) });
+      } catch {
+        // its checks go without the job's id
+      }
+    },
+    /** The id of the job this session took, while it is open and the record verifies; else null. */
+    sessionTask(session) {
+      if (!secret || !session) return null;
+      const v = readJsonFile(sessionTaskFile(session));
+      if (!v || v.session !== String(session) || typeof v.task_id !== 'string' || !Number.isFinite(v.ts)) return null;
+      if (!macEqual(v.mac, sessionTaskMac(secret, session, v.task_id, v.ts))) return null;
+      if (Date.now() - v.ts > SESSION_BASELINE_TTL_MS) return null;
+      return v.task_id;
+    },
+    /**
+     * /clear emptied this session's context while it held an open job (ADR-0157): the next prompt asks
+     * Aimiru for the job (get_task) and gives it to Claude once more. A flag only: the job's id stays
+     * in the signed session record, and nothing here can name another job.
+     */
+    markRegive(session) {
+      if (!session) return;
+      try {
+        fs.mkdirSync(sessionTasksDir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(regiveFile(session), String(Date.now()), { mode: 0o600 });
+      } catch {
+        // the job is not given again
+      }
+    },
+    regiveDue(session) {
+      return Boolean(session) && fs.existsSync(regiveFile(session));
+    },
+    clearRegive(session) {
+      if (!session) return;
+      try {
+        fs.rmSync(regiveFile(session), { force: true });
+      } catch {
+        // given again at most once more
+      }
+    },
+    /** The session recorded its job done or not done (ADR-0157): its later steps carry no job's id. */
+    clearSessionTask(session, taskId) {
+      if (!session) return;
+      const v = readJsonFile(sessionTaskFile(session));
+      if (!v || (taskId && v.task_id !== taskId)) return;
+      try {
+        fs.rmSync(sessionTaskFile(session), { force: true });
+      } catch {
+        // ignore
+      }
+    },
     /** Links a checked call to its later record (keyed by tool_use_id). */
     putCall(toolUseId, data) {
       if (!toolUseId) return;
@@ -792,7 +966,7 @@ export function stateStore(dataDir, { secret = '' } = {}) {
     },
     /** Removes call and pending files older than maxAgeMs (what sessions began with: after SESSION_BASELINE_TTL_MS). */
     cleanup(maxAgeMs = 24 * 3600_000) {
-      for (const [dir, age] of [[callsDir, maxAgeMs], [pendingDir, maxAgeMs], [indexDir, maxAgeMs], [cartsDir, maxAgeMs], [programsDir, maxAgeMs], [wokenDir, maxAgeMs], [sessionsDir, Math.max(maxAgeMs, SESSION_BASELINE_TTL_MS)]]) {
+      for (const [dir, age] of [[callsDir, maxAgeMs], [pendingDir, maxAgeMs], [indexDir, maxAgeMs], [cartsDir, maxAgeMs], [programsDir, maxAgeMs], [wokenDir, maxAgeMs], [sessionsDir, Math.max(maxAgeMs, SESSION_BASELINE_TTL_MS)], [briefsDir, Math.max(maxAgeMs, SESSION_BASELINE_TTL_MS)], [sessionTasksDir, Math.max(maxAgeMs, SESSION_BASELINE_TTL_MS)]]) {
         let names = [];
         try {
           names = fs.readdirSync(dir);
@@ -879,7 +1053,7 @@ export function supportsBlockOnFailure(version) {
  * (CLAUDE_VERSION, CLAUDE_BIN, which decide whether a failed check blocks) (agent-experience review
  * of wk/connectors-flow). Settings that only shorten a wait or ask for more records stay free to change.
  */
-const HIJACK_ENV_RE = /^(NODE_OPTIONS|NODE_PATH|CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_(OPTION_[A-Z0-9_]+|ROOT|DATA)|(AIMIRU|SAYSO)_(AGENT_TOKEN|BASE_URL|URL|PROJECT|CLAUDE_VERSION|CLAUDE_BIN|PLUGIN_[A-Z0-9_]+))$/i;
+export const HIJACK_ENV_RE = /^(NODE_OPTIONS|NODE_PATH|CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_(OPTION_[A-Z0-9_]+|ROOT|DATA)|(AIMIRU|SAYSO)_(AGENT_TOKEN|BASE_URL|URL|PROJECT|CLAUDE_VERSION|CLAUDE_BIN|PLUGIN_[A-Z0-9_]+))$/i;
 
 /** True when these settings turn Aimiru off, or change how its check runs. */
 export function turnsSaysoOff(settingsJson) {

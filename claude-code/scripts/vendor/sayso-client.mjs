@@ -404,6 +404,76 @@ export function runLabelOf(raw) {
   return s === '' ? null : s.slice(0, 60);
 }
 
+/**
+ * True only for a job the person started in Aimiru, whole (ADR-0157): Aimiru marks it from_person,
+ * names no agent it came from, and it is part of no other task. Aimiru gives such a job as its own
+ * lead step (ADR-0124: step.lead, asked by the person, the step being this very task), or with no
+ * step at all; any other step (one an agent asked for, or a later step of a job) is not the
+ * person's own job. A connector gives an agent nothing else unless the person turned work handed
+ * between agents on (defence in depth beside Aimiru's own filter for agents on the computer).
+ */
+export function personsOwnJob(task) {
+  if (!task || typeof task !== 'object' || task.from_person !== true) return false;
+  if (task.from_agent !== null && task.from_agent !== undefined) return false;
+  for (const k of ['parent_task_id', 'parent_id']) if (task[k] !== null && task[k] !== undefined) return false;
+  const id = taskIdOf(task.id);
+  if (id === null) return false;
+  const step = task.step;
+  if (step === null || step === undefined) return true;
+  return typeof step === 'object' && step.lead === true && step.asked_by?.person === true && taskIdOf(step.step_id) === id;
+}
+
+/** A task id as Aimiru gives it (a UUID), trimmed; null for anything else (ADR-0157). */
+export function taskIdOf(raw) {
+  if (typeof raw !== 'string') return null;
+  const id = raw.trim();
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id) ? id : null;
+}
+
+// ---------------------------------------------------------------------------
+// The person's brief (ADR-0151, ADR-0157; contract C2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The longest brief text a connector passes on: a longer one is treated as no brief, never cut (the
+ * text goes on byte for byte). Aimiru renders at most 20 lines of at most 120 characters, about 6,150
+ * characters at the very most (each line learned from every agent Aimiru names), so a longer text is
+ * not one Aimiru sent. It also fits Claude Code's 10,000 characters for one hook's context
+ * (code.claude.com/docs/en/hooks; beyond it Claude gets a file path and a preview, not the text):
+ * the usual paragraph and the longest brief stay under it together, and Claude Code's session start
+ * leaves the brief out whole when a job or a late yes would push its context over (quality review).
+ */
+export const BRIEF_MAX_CHARS = 8_000;
+
+/** A brief's version as a connector keeps it and sends it back in If-None-Match. */
+const BRIEF_VERSION_RE = /^[A-Za-z0-9:._-]{1,128}$/;
+
+/**
+ * What a GET /v1/brief answer means for a connector: {state, text, version, count}, where state is
+ *   given   200 with text: the agent gets `text` exactly as Aimiru wrote it;
+ *   empty   200 with text "": nothing to give (the version still says which brief that is);
+ *   same    304: the version sent in If-None-Match still holds;
+ *   closed  403 or 404 from Aimiru (a door not open to this agent, or an Aimiru from before the
+ *           brief): not asked again in this session;
+ *   none    anything else (423 while paused, an error, a time limit, a malformed answer).
+ * Only `given` puts anything in front of the agent. `lines` and `withheld` never do.
+ */
+export function briefOf(r) {
+  const none = (state = 'none') => ({ state, text: '', version: null, count: 0 });
+  if (!r || typeof r !== 'object') return none();
+  if (r.ok === true && r.status === 200) {
+    const b = r.data?.brief;
+    if (!b || typeof b !== 'object' || Array.isArray(b) || typeof b.text !== 'string' || b.text.length > BRIEF_MAX_CHARS) return none();
+    if (typeof b.version !== 'string' || !BRIEF_VERSION_RE.test(b.version)) return none();
+    const count = Number.isInteger(b.count) && b.count >= 0 ? b.count : Array.isArray(b.lines) ? b.lines.length : 0;
+    if (b.text === '') return { state: 'empty', text: '', version: b.version, count: 0 };
+    return { state: 'given', text: b.text, version: b.version, count };
+  }
+  if (r.ok === false && r.kind === 'http' && r.status === 304) return none('same');
+  if (r.ok === false && r.kind === 'http' && (r.status === 403 || r.status === 404) && r.fromSayso !== false) return none('closed');
+  return none();
+}
+
 // ---------------------------------------------------------------------------
 // Projects (ADR-0056)
 // ---------------------------------------------------------------------------
@@ -1148,10 +1218,14 @@ export function createSaysoClient(opts = {}) {
    * the person's budget for each run and cap on runs at once (ADR-0042). project: {label, hash}
    * from projectOf names the project or client folder the agent works in (ADR-0056).
    */
-  function check(action, { context, idempotencyKey, run, project, parts, timeoutMs = timeouts.checkMs } = {}) {
+  function check(action, { context, idempotencyKey, run, project, parts, taskId, timeoutMs = timeouts.checkMs } = {}) {
     const body = { action };
     if (idempotencyKey) body.idempotency_key = idempotencyKey;
     if (context) body.context = context;
+    // The person's job this step belongs to (ADR-0157), so they can follow it live. An Aimiru from
+    // before it drops the field unread.
+    const task = taskIdOf(taskId);
+    if (task) body.task_id = task;
     const named = wireProject(project);
     if (named) body.project = named;
     const runId = runIdOf(run?.id);
@@ -1182,6 +1256,29 @@ export function createSaysoClient(opts = {}) {
 
   function me({ timeoutMs } = {}) {
     return request('GET', '/v1/me', { timeoutMs: timeoutMs ?? timeouts.requestMs });
+  }
+
+  /**
+   * GET /v1/brief (ADR-0157, contract C2): the person's brief for this agent; read it with briefOf.
+   * ifNoneMatch: the version this session was given, sent as If-None-Match, so Aimiru answers 304
+   * while it still holds. Never spooled, never retried here.
+   */
+  function brief({ timeoutMs, ifNoneMatch = null } = {}) {
+    const headers = typeof ifNoneMatch === 'string' && BRIEF_VERSION_RE.test(ifNoneMatch) ? { 'if-none-match': ifNoneMatch } : {};
+    return request('GET', '/v1/brief', { timeoutMs: timeoutMs ?? timeouts.requestMs, headers });
+  }
+
+  /**
+   * POST /v1/memory (the memory_propose tool, ADR-0125): one plain line about the person that this
+   * agent noticed, for Aimiru to keep as learned or hold for the person (ADR-0157). how: 'noticed' (in
+   * this work) or 'instructions' (what the agent's own instructions or memory already say). Never
+   * spooled: a line Aimiru did not take is said at once, never sent later behind the person's back.
+   */
+  async function memoryPropose({ text, topic = null, how = null } = {}, { timeoutMs } = {}) {
+    const body = { text: String(text ?? '') };
+    if (typeof topic === 'string' && topic) body.topic = topic;
+    if (how === 'noticed' || how === 'instructions') body.how = how;
+    return notePausedAnswer(await request('POST', '/v1/memory', { body, timeoutMs: timeoutMs ?? timeouts.requestMs }));
   }
 
   /**
@@ -1253,8 +1350,18 @@ export function createSaysoClient(opts = {}) {
    * a temporary key, shown this once; withBudget false says this agent cannot use a key of its own,
    * so none is made.
    */
-  async function takeTask({ timeoutMs, withBudget } = {}) {
+  async function takeTask({ timeoutMs, withBudget, runner } = {}) {
     const body = typeof withBudget === 'boolean' ? { with_budget: withBudget } : {};
+    // The runner on this computer (ADR-0161): its id and the kind of computer; busy while a job runs
+    // (it only says the runner is on, and takes nothing), leaving when it stops. Nothing else of it.
+    if (runner && typeof runner === 'object' && typeof runner.id === 'string') {
+      body.runner = {
+        id: runner.id,
+        device: String(runner.device ?? ''),
+        ...(runner.busy === true ? { busy: true } : {}),
+        ...(runner.leaving === true ? { leaving: true } : {}),
+      };
+    }
     return notePausedAnswer(await request('POST', '/v1/tasks/take', { body, timeoutMs: timeoutMs ?? timeouts.requestMs }));
   }
 
@@ -1421,7 +1528,7 @@ export function createSaysoClient(opts = {}) {
     return d;
   }
 
-  async function decideOnce(action, { context, idempotencyKey: given, deadlineMs, run, project, parts } = {}) {
+  async function decideOnce(action, { context, idempotencyKey: given, deadlineMs, run, project, parts, taskId } = {}) {
     // One key for this decision, made here when the caller has none: a second try after a dropped
     // connection, or after a 429, is then a replay Aimiru answers with its first answer, never a
     // second action and a second question (wave 10 review).
@@ -1441,13 +1548,21 @@ export function createSaysoClient(opts = {}) {
     if (checkTimeout() < 250) {
       return failByClass(action, 'unreachable', MESSAGES.unreachable(cls), { status: 0, requestId: null, serverRequestId: null });
     }
-    let r = await check(wire, { context, idempotencyKey, run, project, parts: named9, timeoutMs: checkTimeout() });
+    // The person's job this step belongs to, when there is one (ADR-0157): only a well-formed id goes.
+    let task = taskIdOf(taskId);
+    let r = await check(wire, { context, idempotencyKey, run, project, parts: named9, taskId: task, timeoutMs: checkTimeout() });
+    // An Aimiru that refused the field as a bad request (one from before it drops it unread): the
+    // same step is checked again without it, so a check never fails because of the job's id.
+    if (task && !r.ok && r.kind === 'http' && (r.status === 400 || r.status === 422) && r.fromSayso !== false && checkTimeout() >= 250) {
+      task = null;
+      r = await check(wire, { context, idempotencyKey, run, project, parts: named9, timeoutMs: checkTimeout() });
+    }
     if (!r.ok && r.kind === 'http' && r.status === 429) {
       const wait = r.retryAfterMs ?? 1000;
       const left = deadlineMs ? deadlineMs - Date.now() - 1_000 : Infinity;
       if (wait <= timeouts.maxRetryAfterMs && wait < left) {
         await sleep(wait);
-        if (checkTimeout() >= 250) r = await check(wire, { context, idempotencyKey, run, project, parts: named9, timeoutMs: checkTimeout() });
+        if (checkTimeout() >= 250) r = await check(wire, { context, idempotencyKey, run, project, parts: named9, taskId: task, timeoutMs: checkTimeout() });
       }
     }
     const base = { status: r.status, requestId: r.requestId, serverRequestId: r.serverRequestId ?? null };
@@ -1597,6 +1712,8 @@ export function createSaysoClient(opts = {}) {
     flushSpool,
     heartbeat,
     me,
+    brief,
+    memoryPropose,
     pause,
     pauseAck,
     pausedLocally,
