@@ -21,7 +21,7 @@
 // connectors/shared/ and run `node scripts/sync-shared.mjs`.
 
 import { spawn as childSpawn } from 'node:child_process';
-import { normaliseBaseUrl, setting } from './sayso-client.mjs';
+import { normaliseBaseUrl, setting } from './aimiru-client.mjs';
 
 /** A page address with nothing a shell or Windows' command line reads specially. */
 const PLAIN_PAGE = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?(?:\/[A-Za-z0-9._~-]+)+$/;
@@ -40,7 +40,7 @@ const present = (v) => typeof v === 'string' && v.trim() !== '';
 
 /**
  * True when a browser opened here appears in front of the person: not over SSH, not turned off with
- * AIMIRU_NO_BROWSER=1 (or SAYSO_NO_BROWSER=1), and on systems other than macOS and Windows only
+ * AIMIRU_NO_BROWSER=1, and on systems other than macOS and Windows only
  * with a screen to show it on.
  */
 export function browserHere(env = process.env, platform = process.platform) {

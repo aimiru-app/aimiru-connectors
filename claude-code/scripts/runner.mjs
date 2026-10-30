@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The runner for Claude Code (ADR-0161): `node "<plugin>/scripts/runner.mjs" <on|off|status|run>` in
 // a terminal of the person's own, and what the LaunchAgent starts from the runner's own copy
-// (`node ~/.sayso/runner/app/runner.mjs run`). The runner itself is vendor/runner.mjs, shared with
+// (`node ~/.aimiru/runner/app/runner.mjs run`). The runner itself is vendor/runner.mjs, shared with
 // Codex; Claude Code's take path is lib/runner-agent.mjs. Never from inside Claude Code.
 
 import path from 'node:path';

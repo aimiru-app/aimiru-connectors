@@ -1,6 +1,6 @@
 {
   "name": "aimiru-codex",
-  "version": "0.3.0-rc.2",
+  "version": "0.3.0-rc.3",
   "description": "Aimiru's check for Codex: Codex's own commands, file changes and tool server calls are checked against your Aimiru rules before they run, and recorded.",
   "type": "module",
   "license": "MIT",

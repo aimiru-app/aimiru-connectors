@@ -8,7 +8,7 @@
 
 import path from 'node:path';
 import { redactContacts } from '../vendor/contacts.mjs';
-import { redactSecrets, truncate } from '../vendor/sayso-client.mjs';
+import { redactSecrets, truncate } from '../vendor/aimiru-client.mjs';
 
 /** The least time between two notes. */
 export const PROGRESS_GAP_MS = 3_000;

@@ -77,14 +77,14 @@ export const DEFAULT_CONNECT = 'Add the key you were given, from the demo page o
 
 /**
  * The line that removes each connector (wave 10, shapes 3), word for word as the demo page and the
- * READMEs show it, by the connector's own name (the part of x-sayso-connector before the slash).
+ * READMEs show it, by the connector's own name (the part of x-aimiru-connector before the slash).
  * The go-between names the app's settings file it moved the servers out of when it knows it.
  */
 export const UNDO_LINES = Object.freeze({
   'claude-code': 'claude plugin uninstall aimiru@aimiru',
   'mcp-proxy': 'npx aimiru-mcp-proxy restore --to ~/.cursor/mcp.json',
   codex: 'npx aimiru-codex uninstall',
-  openclaw: 'openclaw plugins uninstall sayso',
+  openclaw: 'openclaw plugins uninstall aimiru',
 });
 
 /** The undo line for a connector named "<name>" or "<name>/<version>", or null when there is none. */
@@ -468,22 +468,21 @@ export function lateYesNextMessage(toolName, toolInput) {
  * Aimiru's own sentence for a person's no (workers/agent-api/src/copy.ts, approvalCopy.denied). It says
  * what askDenied says, so it is not repeated after it; any other sentence (a reason) is kept.
  */
-const SAYSO_PLAIN_NO = new Set(['The person denied this.']);
+const AIMIRU_PLAIN_NO = new Set(['The person denied this.']);
 
 /** "You said no in Aimiru.", plus Aimiru's sentence when it adds something. */
 export function personSaidNo(explain) {
   const e = String(explain ?? '').trim();
-  return e && !SAYSO_PLAIN_NO.has(e) ? `${MESSAGES.askDenied} ${e}` : MESSAGES.askDenied;
+  return e && !AIMIRU_PLAIN_NO.has(e) ? `${MESSAGES.askDenied} ${e}` : MESSAGES.askDenied;
 }
 
 /**
  * A refusal's reason as the agent shows it: as it is when it already starts with the product's name,
- * else with "Aimiru: " in front. A server from before the rename (ADR-0093) starts its own sentences
- * with Sayso; those are not named twice.
+ * else with "Aimiru: " in front, so the name is never said twice.
  */
 export function withName(text) {
   const t = String(text ?? '');
-  return /^(Aimiru|Sayso)/.test(t) ? t : `${MESSAGES.prefix}${t}`;
+  return /^Aimiru/.test(t) ? t : `${MESSAGES.prefix}${t}`;
 }
 
 /**

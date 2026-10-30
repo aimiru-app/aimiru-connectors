@@ -1,6 +1,11 @@
 # Changes to Aimiru's check for Codex
 
-## 0.3.0-rc.2 (pre-release, not released yet)
+## 0.3.0-rc.3 (pre-release, not released yet)
+
+- Aimiru's files now live in `~/.aimiru`: the key, the copy of the check and what waits to be sent are in `~/.aimiru/codex`. Settings are named `AIMIRU_...` (`AIMIRU_AGENT_TOKEN`, `AIMIRU_BASE_URL`, `AIMIRU_CODEX_DATA` and the rest), and the address flag is `--aimiru-url`. What to do: run the install line again, `npx aimiru-codex@next init`. It takes the key the earlier install saved for the same address, so Codex stays the same agent in Aimiru, rewrites Aimiru's two entries in Codex's `hooks.json` in the same place, and then removes the earlier copy of the check and its key. Open Codex, type `/hooks` and trust "Checking with Aimiru" and "Aimiru's brief" again. If it finds no key to take, pick the code on your phone once to connect again: that adds a new Codex in Aimiru, so remove the earlier one under Agents, and its key stops working. If the runner was on, run `npx aimiru-codex@next runner on` again, so it starts from `~/.aimiru/runner`. Update Claude Code in the same sitting: until every connector on a computer is on this version, they do not guard each other's Aimiru files, and `init` and the doctor name the one that is not.
+- Keys Aimiru gives start `aimiru_agt_` once this version is the one `npx aimiru-codex` installs; a key from before keeps working.
+
+## 0.3.0-rc.2 (pre-release, 29 Oct 2026)
 
 - Aimiru's brief: a second entry in Codex's `hooks.json` gives Codex what you told Aimiru about yourself as each session starts. Trust it once in Codex, under `/hooks`, as "Aimiru's brief". It never takes a job.
 - Installing again leaves each of Aimiru's entries where it is, so the trust you gave it stays. An entry that changed is rewritten in the same place, and Codex asks you to trust it again.

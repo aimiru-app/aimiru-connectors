@@ -45,7 +45,7 @@ import {
   strongest,
   withProgramSentence,
 } from '../vendor/classify.mjs';
-import { evidenceText, redactSecrets, shellEvidenceInput, truncate } from '../vendor/sayso-client.mjs';
+import { evidenceText, redactSecrets, shellEvidenceInput, truncate } from '../vendor/aimiru-client.mjs';
 
 /** What a change to Codex's or Aimiru's own files names (CONTRACT.md, the protected-paths row). */
 const REMOVE_GUARD = INCIDENT_RESOURCES.removeGuard;
@@ -54,7 +54,7 @@ const REMOVE_GUARD = INCIDENT_RESOURCES.removeGuard;
  * The project Codex works in, when it works in none (the home folder, or above it): a folder that
  * cannot exist, so nothing counts as local work and the person's files read as theirs.
  */
-export const NO_PROJECT = path.join(path.sep, '.sayso-codex-no-project');
+export const NO_PROJECT = path.join(path.sep, '.aimiru-codex-no-project');
 
 /**
  * Codex's own local tools that change nothing outside Codex: answered without asking Aimiru, as Aimiru

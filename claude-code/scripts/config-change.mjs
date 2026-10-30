@@ -9,7 +9,7 @@
 // Policy (managed) settings cannot be blocked and are left alone.
 
 import fs from 'node:fs';
-import { CONNECTOR, VERSION, loadSettings, makeClient, pluginInstallSource, readStdinJson, skillVersion, turnsSaysoOff, writeJson } from './lib/runtime.mjs';
+import { CONNECTOR, VERSION, loadSettings, makeClient, pluginInstallSource, readStdinJson, skillVersion, turnsAimiruOff, writeJson } from './lib/runtime.mjs';
 
 async function main() {
   let input = {};
@@ -25,7 +25,7 @@ async function main() {
   } catch {
     return;
   }
-  if (!turnsSaysoOff(parsed)) return;
+  if (!turnsAimiruOff(parsed)) return;
 
   writeJson({ decision: 'block', reason: 'Aimiru stays on until Claude Code restarts.' });
 

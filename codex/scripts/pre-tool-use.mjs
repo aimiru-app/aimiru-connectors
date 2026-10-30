@@ -46,7 +46,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ASKS_TRACE_FILE, appendTrace, askHoldMs, isFailClosed, projectOf, quietUntilOf, redactSecrets, setting, sha256Hex, truncate } from './vendor/sayso-client.mjs';
+import { ASKS_TRACE_FILE, appendTrace, askHoldMs, isFailClosed, projectOf, quietUntilOf, redactSecrets, setting, sha256Hex, truncate } from './vendor/aimiru-client.mjs';
 import { MESSAGES, clockOf, personSaidNo, waitWords, withName } from './vendor/messages.mjs';
 import { createLocalState, localDecision, localReadsOn, localRecord } from './vendor/local.mjs';
 import { ackOnce, holdCeilingMs, holdWhilePaused, pauseHoldOn, yesBeforeLastPause } from './vendor/pause-watch.mjs';
@@ -82,7 +82,7 @@ import {
   watchFor,
 } from './lib/runtime.mjs';
 
-/** The folder this check runs from (the copy init made, ~/.sayso/codex/app). */
+/** The folder this check runs from (the copy init made, ~/.aimiru/codex/app). */
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const started = Date.now();
@@ -103,7 +103,7 @@ let stepWatch = null;
 
 /** Tells the guard what to answer if this process dies now (guard.mjs). */
 function fallback(verdict) {
-  const fd = Number(process.env.SAYSO_FALLBACK_FD);
+  const fd = Number(process.env.AIMIRU_FALLBACK_FD);
   if (!Number.isInteger(fd) || fd < 3) return;
   try {
     fs.writeSync(fd, `${verdict}\n`);
@@ -130,7 +130,7 @@ let refusal = null;
  * needs, then the usual 45 s once the step goes through its normal check.
  */
 function guardLimit(ms) {
-  const fd = Number(process.env.SAYSO_FALLBACK_FD);
+  const fd = Number(process.env.AIMIRU_FALLBACK_FD);
   if (!Number.isInteger(fd) || fd < 3) return;
   try {
     fs.writeSync(fd, `limit ${Math.max(1_000, Math.floor(ms))}\n`);
@@ -184,7 +184,7 @@ function maybeBackground(local, watch) {
     const watching = watch.pollDue(BACKGROUND_DUE_MS);
     if (!sending && !watching) return;
     const env = { ...process.env };
-    delete env.SAYSO_FALLBACK_FD;
+    delete env.AIMIRU_FALLBACK_FD;
     const child = spawn(process.execPath, [path.join(APP_DIR, 'background.mjs')], { detached: true, stdio: 'ignore', env });
     child.on('error', () => {});
     child.unref();
@@ -199,7 +199,7 @@ function deny(reason) {
 
 /** "You said no" only when the person did; a pause or a removed key while waiting says so instead. */
 function deniedReason(answer) {
-  if (answer.reason === 'sayso') return personSaidNo(answer.explain);
+  if (answer.reason === 'aimiru') return personSaidNo(answer.explain);
   return answer.explain || MESSAGES.doNotAct;
 }
 
@@ -564,7 +564,7 @@ async function main() {
             return onPaused(answer.explain || MESSAGES.paused);
           } else if (answer.status === 'denied') {
             store.deletePending(fp);
-            traceAsk({ kind: 'answered', exception_id: pending.exceptionId, outcome: answer.reason === 'sayso' ? 'denied' : answer.reason });
+            traceAsk({ kind: 'answered', exception_id: pending.exceptionId, outcome: answer.reason === 'aimiru' ? 'denied' : answer.reason });
             deny(deniedReason(answer));
             return 'done';
           } else if (answer.status === 'waiting') {
@@ -603,7 +603,7 @@ async function main() {
           reporting,
         ]);
         if (d.reason === 'unreachable' || d.reason === 'bad_response' || d.remembered) store.markDown(DOWN_WINDOW_MS);
-        else if (d.reason === 'sayso') store.markUp();
+        else if (d.reason === 'aimiru') store.markUp();
 
         if (d.decision === 'allow') {
           if (d.failOpen) {

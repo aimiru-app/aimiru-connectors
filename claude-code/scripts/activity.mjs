@@ -27,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeConfigDir, findDataDir, keyFilePath, loadSettings } from './lib/runtime.mjs';
 import { readKeyFile } from './vendor/pair.mjs';
-import { normaliseBaseUrl } from './vendor/sayso-client.mjs';
+import { normaliseBaseUrl } from './vendor/aimiru-client.mjs';
 
 export const HELPER_FILE = 'otel-headers.mjs';
 export const OTLP_PATH = '/v1/otlp/v1/logs';
@@ -45,12 +45,29 @@ try {
   const st = fs.statSync(file);
   if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) process.exit(1);
   const v = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!v || typeof v.key !== 'string' || !/^sayso_agt_[A-Za-z0-9_-]{43}$/.test(v.key)) process.exit(1);
+  if (!v || typeof v.key !== 'string' || !/^[a-z]{3,12}_agt_[A-Za-z0-9_-]{43}$/.test(v.key)) process.exit(1);
   process.stdout.write(JSON.stringify({ Authorization: 'Bearer ' + v.key }));
 } catch {
   process.exit(1);
 }
 `;
+
+/**
+ * Brings a helper an earlier release wrote up to this one's (security review of the rename): the
+ * helper lives in the plugin's data folder, which an update keeps, and 0.3.0-rc.2's reads only keys
+ * of the earlier prefix, so a key saved since would send no header and the activity report would
+ * stop without a word. Only a helper that is there is rewritten. True when it was.
+ */
+export function refreshHelper(dataDir) {
+  const file = path.join(dataDir, HELPER_FILE);
+  try {
+    if (fs.readFileSync(file, 'utf8') === HELPER_SOURCE) return false;
+  } catch {
+    return false;
+  }
+  writeAtomic(file, HELPER_SOURCE, 0o700);
+  return true;
+}
 
 /** Claude Code's own settings file, as the person reads it, when it is in its usual place. */
 const SETTINGS_WORDS = '~/.claude/settings.json';
@@ -281,6 +298,7 @@ export async function activity({
     return 1;
   }
   if (isOn(settings, base, dataDir) && fs.existsSync(path.join(dataDir, HELPER_FILE))) {
+    refreshHelper(dataDir);
     say(ACTIVITY_MESSAGES.already(base));
     say(ACTIVITY_MESSAGES.what);
     return 0;

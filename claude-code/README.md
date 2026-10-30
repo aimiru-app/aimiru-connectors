@@ -26,7 +26,7 @@ Claude Code names the plugin by its full id, `aimiru@aimiru`, in every command a
 
 Run `/plugin configure aimiru@aimiru` inside Claude Code, fill in these two, which Aimiru shows under Agents, Add an agent, Claude Code, then restart Claude Code (it reads the key only when it starts):
 
-- **Aimiru key for Claude Code**, which starts with `sayso_agt_`. Claude Code keeps it in your computer's keychain, not in a settings file. A key set here is used before one `/aimiru:connect` saved.
+- **Aimiru key for Claude Code**, which starts with `aimiru_agt_`. Claude Code keeps it in your computer's keychain, not in a settings file. A key set here is used before one `/aimiru:connect` saved.
 - **Aimiru address**, which starts with `https://` and has no slash at the end.
 
 ### Or connect without copying a key
@@ -60,7 +60,7 @@ Most of what Claude Code does is read and change files inside your project. When
 | Claude Code tool | How Aimiru sees it |
 |---|---|
 | Bash and PowerShell | From the command itself. Payment tools and requests to payment services: a payment. Email, messages, `gh pr create`, publishing and deploying: a message. `git push`: a message that names the repository it goes to (`github.com/owner/repo`), read from git's own settings on this computer. Deleting files outside the project: a deletion of your files, so a rule about deleting files or data covers it. When the command shows which files only as it runs (a folder kept in a variable other than `$HOME`, a list another program hands it), or they are a cache folder programs rebuild by themselves, it is a deletion Aimiru asks you about. Dropping a database: a deletion. Deleting cloud or server data (`terraform destroy`, `kubectl delete`, `helm uninstall`, `docker system prune`, a cloud command line's delete step, a `DELETE` request to a cloud provider): a deletion of your cloud and server data, so "Never delete my data" covers it. A make target or package script named deploy, release, publish or ship (`make deploy`, `npm run deploy`): a deploy. A new or changed program, run from a file that was not in your last commit when the session began (`node scripts/cleanup.js`, `bash ./tmp.sh`): see below. A plain web read (`curl URL`, `wget URL`, any GET or HEAD that sends nothing): reading, with the site named, recorded and not asked about. A request that sends data off this computer (`curl -d`, `-F` or `-T`, any POST, a long run of data in a header or in the address, `scp`, `sftp`, `rsync`, `nc`, `ssh` given input): sharing, with the full host named, so Aimiru asks the first time data goes to a new place, and it does not run while Aimiru cannot be reached; when the host is known only as the command runs, sharing with no host, asked each time. Inline code that reaches the network (`python -c`, `node -e`): sharing, asked each time. Signing in or reading saved passwords: a sign-in. Changes outside the project or to the system: a change. Installs: other. Known local work (looking at files and text, git steps on this project, the project's own tests, builds and scripts): reading. A program Aimiru does not know, or one named only when it runs: other, held when Aimiru cannot be reached. |
-| Write, Edit, MultiEdit, NotebookEdit | Inside the project or a temporary folder: local work, which your read rule covers and Aimiru records as a change to files in Claude Code's work folders. Outside it: a change. Claude Code's, Codex's or Aimiru's own settings and files (`~/.claude/settings.json`, a project's `.claude/settings*.json`, `.claude.json`, `~/.claude/plugins`, `~/.sayso`, Codex's `config.toml`, `hooks.json` and rules in `~/.codex` or a project's `.codex` folder, and the same under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`): treated as removing a guard, so Aimiru asks you, and it does not run while Aimiru cannot be reached. The same goes for a command, inline code or a tool server argument that changes them, `git checkout` or `git restore` of them included. |
+| Write, Edit, MultiEdit, NotebookEdit | Inside the project or a temporary folder: local work, which your read rule covers and Aimiru records as a change to files in Claude Code's work folders. Outside it: a change. Claude Code's, Codex's or Aimiru's own settings and files (`~/.claude/settings.json`, a project's `.claude/settings*.json`, `.claude.json`, `~/.claude/plugins`, `~/.aimiru`, Codex's `config.toml`, `hooks.json` and rules in `~/.codex` or a project's `.codex` folder, and the same under `CLAUDE_CONFIG_DIR` and `CODEX_HOME`): treated as removing a guard, so Aimiru asks you, and it does not run while Aimiru cannot be reached. The same goes for a command, inline code or a tool server argument that changes them, `git checkout` or `git restore` of them included. |
 | WebFetch | Reading, with the site named, recorded and not asked about; sharing with the site when its address carries data. |
 | WebSearch, Agent, Workflow | Reading. The helpers' own actions are each checked as they happen. |
 | Monitor | From its command, like Bash. Watching an address: other. |
@@ -78,7 +78,7 @@ Not checked, because they only read on this computer or only change Claude Code'
 
 ## The Aimiru routine
 
-The plugin carries the Aimiru routine as a skill (`skills/sayso/SKILL.md`): the few steps that tell Claude when to check with Aimiru, what to do while a question to you is open, and how to record what it did. Each session tells Aimiru which version it has, so the agent's page in Aimiru says "Knows the Aimiru routine". The same words are in Aimiru's own instructions, on every Aimiru Card and at `/skill.md` on your Aimiru address. To bring it up to date, run `claude plugin update aimiru@aimiru`.
+The plugin carries the Aimiru routine as a skill (`skills/aimiru/SKILL.md`): the few steps that tell Claude when to check with Aimiru, what to do while a question to you is open, and how to record what it did. Each session tells Aimiru which version it has, so the agent's page in Aimiru says "Knows the Aimiru routine". The same words are in Aimiru's own instructions, on every Aimiru Card and at `/skill.md` on your Aimiru address. To bring it up to date, run `claude plugin update aimiru@aimiru`.
 
 The plugin also gives Claude Aimiru's own tools, so it can tell Aimiru what it did and see whether you have paused. They talk only to Aimiru and are not checked with it. Claude Code asks you the first time Claude uses each one; allow it for good there if you like. Claude never needs them to check an action: the plugin checks every tool call itself, and the session tells Claude so. They use the same key as the checks: the one `/aimiru:connect` saved, or the one in the plugin's settings. If you connect in the middle of a session, they appear a moment later. If Aimiru cannot be reached when a session starts, the session starts without them and they appear once Aimiru answers, with no restart.
 
@@ -152,7 +152,7 @@ Nothing is printed that contains your key. Records that cannot be sent wait in t
 
 ## Advanced settings
 
-These are read from the environment Claude Code runs in. Each is also read under its name from before the rename, with `SAYSO_` in place of `AIMIRU_` (`SAYSO_LOCAL_READS`, and so on); when both are set, the `AIMIRU_` one wins.
+These are read from the environment Claude Code runs in.
 
 | Variable | Default | What it changes |
 |---|---|---|
@@ -174,4 +174,4 @@ Claude Code started with a settings folder of its own (`CLAUDE_CONFIG_DIR`) work
 claude plugin uninstall aimiru@aimiru
 ```
 
-When a demo ends, every step is refused with "The demo has ended. To remove Aimiru, run claude plugin uninstall aimiru@aimiru." An install made before the plugin was renamed is still called `sayso`: run `claude plugin uninstall sayso` instead. It applies when Claude Code restarts. To stop the key working as well, remove the agent in Aimiru, under Agents.
+When a demo ends, every step is refused with "The demo has ended. To remove Aimiru, run claude plugin uninstall aimiru@aimiru." It applies when Claude Code restarts. To stop the key working as well, remove the agent in Aimiru, under Agents.

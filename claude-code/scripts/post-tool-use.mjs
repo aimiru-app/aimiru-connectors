@@ -9,9 +9,9 @@
 // sends them (one waiter per data folder; hooks.json gives this hook 45 s).
 // Async hooks cannot change anything in Claude Code, so this script prints nothing.
 
-import { actionForClaudeCodeTool, isSaysoTool, splitMcpToolName } from './vendor/classify.mjs';
+import { actionForClaudeCodeTool, isAimiruTool, splitMcpToolName } from './vendor/classify.mjs';
 import { linkRequestIdIn, ucpCart, ucpCheckoutIn, ucpOperation, ucpOrderId, ucpScope } from './vendor/checkout.mjs';
-import { projectOf, redactDeep, sha256Hex, truncate } from './vendor/sayso-client.mjs';
+import { projectOf, redactDeep, sha256Hex, truncate } from './vendor/aimiru-client.mjs';
 import { flushLocal, waitThenFlush } from './vendor/local.mjs';
 import { loadSettings, localStateFor, makeClient, readStdinJson, refreshSnapshot, stateStore } from './lib/runtime.mjs';
 
@@ -56,7 +56,7 @@ async function main() {
   }
   const event = input?.hook_event_name || 'PostToolUse';
   if (!input?.tool_name) return;
-  if (isSaysoTool(input.tool_name, input.mcp_server)) {
+  if (isAimiruTool(input.tool_name, input.mcp_server)) {
     // Claude recorded the session's job done or not done with Aimiru's own record tool (ADR-0157):
     // the session's later steps no longer name that job. Aimiru's own tools are never recorded here.
     if (event === 'PostToolUse' && endsSessionJob(input)) {
@@ -104,7 +104,7 @@ async function main() {
 
   // check already wrote this action to the Record. A finished read adds nothing, so it is not
   // confirmed again (keeps within the per-key rate limit), unless it ran a program the agent wrote:
-  // its receipt keeps the file's fingerprint. Set AIMIRU_RECORD_READS=1 (or SAYSO_RECORD_READS=1) to confirm all.
+  // its receipt keeps the file's fingerprint. Set AIMIRU_RECORD_READS=1 to confirm all.
   const skip = call && !call.unchecked && action.class === 'read' && outcome === 'completed' && !settings.recordReads && !artifacts.length;
 
   if (!skip) {

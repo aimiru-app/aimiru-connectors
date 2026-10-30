@@ -6,16 +6,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SAYSO_PLUGIN_NAMES, claudeConfigDirPaths } from '../vendor/classify.mjs';
+import { AIMIRU_PLUGIN_NAMES, claudeConfigDirPaths } from '../vendor/classify.mjs';
 import { createLocalState, refreshLocal } from '../vendor/local.mjs';
 import { readKeyFile } from '../vendor/pair.mjs';
 import { createPauseWatch } from '../vendor/pause-watch.mjs';
 import { readSkillVersion } from '../vendor/routine.mjs';
-import { ASK_HOLD_MS, createPauseMemory, createSaysoClient, installSource, setting, sha256Hex } from '../vendor/sayso-client.mjs';
+import { ASK_HOLD_MS, createPauseMemory, createAimiruClient, installSource, setting, sha256Hex } from '../vendor/aimiru-client.mjs';
 import { CLAUDE_CODE_CONNECT } from '../vendor/messages.mjs';
 
 export const CONNECTOR = 'claude-code';
-export const VERSION = '0.3.0-rc.2';
+export const VERSION = '0.3.0-rc.3';
 /** onFailure: "block" makes a failed or timed-out check block the call (Claude Code 2.1.295, CHANGELOG). */
 export const MIN_ENFORCED_VERSION = '2.1.295';
 export const AGENT_LABEL = 'Claude Code';
@@ -50,7 +50,7 @@ export function briefMissed(r) {
   if (!r || typeof r !== 'object') return true;
   if (r.ok) return false;
   if (r.kind === 'timeout' || r.kind === 'network') return true;
-  return r.kind === 'http' && (r.fromSayso === false || r.status >= 500);
+  return r.kind === 'http' && (r.fromAimiru === false || r.status >= 500);
 }
 
 /** Whether this computer holds the person's Pause for this agent now (the last word Aimiru gave, ADR-0022). */
@@ -66,7 +66,7 @@ export function pausedHere(settings) {
  * Where this plugin was installed from, for the heartbeat (ADR-0041): the Claude Code plugin
  * marketplace when Claude Code runs it from ~/.claude/plugins (or from the plugins folder of the
  * settings folder CLAUDE_CONFIG_DIR names), npm from node_modules, else unknown (a local folder).
- * AIMIRU_INSTALL_SOURCE (or SAYSO_INSTALL_SOURCE) overrides. Only the one word leaves.
+ * AIMIRU_INSTALL_SOURCE overrides. Only the one word leaves.
  */
 export function pluginInstallSource(env = process.env) {
   const modulePath = env.CLAUDE_PLUGIN_ROOT || import.meta.url;
@@ -119,13 +119,13 @@ export function protectedConfigPaths(env = process.env) {
  */
 export const HOOK_BUDGET_MS = 30_000;
 
-/** The run's budget: AIMIRU_HOOK_BUDGET_MS (or SAYSO_) can only make it shorter, never longer than HOOK_BUDGET_MS. */
+/** The run's budget: AIMIRU_HOOK_BUDGET_MS can only make it shorter, never longer than HOOK_BUDGET_MS. */
 export function hookBudgetMs(env = process.env) {
   return Math.min(HOOK_BUDGET_MS, intFromEnv(env, 'HOOK_BUDGET_MS', HOOK_BUDGET_MS));
 }
 /**
  * How long an ask holds the step (ADR-0145): 4 s whatever the person's reach, 0 in quiet hours.
- * AIMIRU_ASK_BUDGET_MS (or SAYSO_ASK_BUDGET_MS), when set, can only make it shorter.
+ * AIMIRU_ASK_BUDGET_MS, when set, can only make it shorter.
  */
 export const DEFAULT_ASK_BUDGET_MS = ASK_HOLD_MS;
 
@@ -251,8 +251,8 @@ export function quotedStep(call) {
 export const DOWN_WINDOW_MS = 30_000;
 
 /**
- * True only when the person turned task taking on for this computer (AIMIRU_TAKE_TASKS=1, or
- * SAYSO_TAKE_TASKS=1; ADR-0145, which makes ADR-0043's hand-offs opt-in): hand-offs between agents
+ * True only when the person turned task taking on for this computer (AIMIRU_TAKE_TASKS=1;
+ * ADR-0145, which makes ADR-0043's hand-offs opt-in): hand-offs between agents
  * are not in the wedge, so by default a session start takes no handed-off task and reports that it
  * does not, and Claude may not take one with Aimiru's take_task either.
  */
@@ -261,8 +261,8 @@ export function takesTasksHere(env = process.env) {
 }
 
 /**
- * True unless the person turned job taking off on this computer (ADR-0157): AIMIRU_TAKE_TASKS (or
- * SAYSO_TAKE_TASKS) unset, or 1. A session the person starts in their own terminal then takes the job
+ * True unless the person turned job taking off on this computer (ADR-0157): AIMIRU_TAKE_TASKS
+ * unset, or 1. A session the person starts in their own terminal then takes the job
  * they gave Claude Code in Aimiru, when Aimiru gives it one (Aimiru decides: its door, the person's
  * grant for this agent, and this connector's version); any other value turns that off. Whether Claude
  * may call take_task itself is still takesTasksHere above, unchanged.
@@ -295,7 +295,7 @@ export function openTaskOf(r, handOffsHere) {
   };
 }
 
-/** A positive number setting (AIMIRU_<name>, or SAYSO_<name>), else the fallback. */
+/** A positive number setting (AIMIRU_<name>), else the fallback. */
 function intFromEnv(env, name, fallback) {
   const v = Number(setting(env, name));
   return Number.isFinite(v) && v > 0 ? v : fallback;
@@ -313,8 +313,7 @@ export function keyFilePath(dataDir) {
  * /aimiru:doctor): Claude Code sets CLAUDE_PLUGIN_DATA only for its own runs (the hooks), not for a
  * command Claude runs, so the folder is found where Claude Code keeps it
  * (~/.claude/plugins/data/aimiru-<marketplace>), as the hooks see it. Without it, a key saved by
- * /aimiru:connect would land where no hook reads it. The plugin's published name comes first; the
- * name it had before (sayso-<marketplace>) is read only when there is no folder under the new one.
+ * /aimiru:connect would land where no hook reads it.
  * A Claude Code started with its own settings folder (CLAUDE_CONFIG_DIR) keeps the folder in there
  * (<CLAUDE_CONFIG_DIR>/plugins/data), and only there: ~/.claude may belong to the person's everyday
  * Claude Code, whose hooks never read this one's key and whose own key a save there would replace.
@@ -325,7 +324,7 @@ export function findDataDir(env = process.env) {
   const base = path.join(claudeConfigDir(env), 'plugins', 'data');
   try {
     const names = fs.readdirSync(base).sort();
-    for (const plugin of SAYSO_PLUGIN_NAMES) {
+    for (const plugin of AIMIRU_PLUGIN_NAMES) {
       const re = new RegExp(`^${plugin}(-|$)`);
       const hit = names.find((n) => re.test(n));
       if (hit) return path.join(base, hit);
@@ -333,7 +332,7 @@ export function findDataDir(env = process.env) {
   } catch {
     // not installed through a marketplace
   }
-  return path.join(home, '.sayso', 'claude-code');
+  return path.join(home, '.aimiru', 'claude-code');
 }
 
 /** The plugin's id as its install line makes it (plugin@marketplace), first among its settings. */
@@ -357,14 +356,13 @@ export const REINSTALL_LINES = Object.freeze([`claude plugin uninstall ${PLUGIN_
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
 
 /**
- * A plain setting the person gave the plugin (its userConfig, such as sayso_url), as Claude Code
+ * A plain setting the person gave the plugin (its userConfig, such as aimiru_url), as Claude Code
  * keeps it in its settings file: <settings folder>/settings.json, pluginConfigs["aimiru@aimiru"]
  * .options (ADR-0150). Claude Code hands it to the plugin's hooks and tool server as
  * CLAUDE_PLUGIN_OPTION_<NAME>, but not to a command Claude runs, such as /aimiru:connect (Mac run
  * part 1, item 1: "Set the Aimiru address first" although the install saved it). The settings folder
  * is the one CLAUDE_CONFIG_DIR names, else ~/.claude, and only that one (claudeConfigDir). The plugin
- * from another marketplace, or under the name it had before (sayso), is read when aimiru@aimiru has
- * none. The key is never read here: Claude Code keeps it in the computer's keychain. Null when unset.
+ * from another marketplace is read when aimiru@aimiru has none. The key is never read here: Claude Code keeps it in the computer's keychain. Null when unset.
  */
 export function savedPluginOption(env, name) {
   const file = path.join(claudeConfigDir(env), 'settings.json');
@@ -379,7 +377,7 @@ export function savedPluginOption(env, name) {
   // aimiru@aimiru first, then the plugin's names from any marketplace; null for another plugin.
   const order = (id) => {
     if (id === PLUGIN_ID) return 0;
-    const i = SAYSO_PLUGIN_NAMES.findIndex((p) => id === p || id.startsWith(`${p}@`));
+    const i = AIMIRU_PLUGIN_NAMES.findIndex((p) => id === p || id.startsWith(`${p}@`));
     return i === -1 ? null : i + 1;
   };
   const ours = Object.keys(configs)
@@ -476,8 +474,8 @@ export function ownSetupCommand(command, pluginRoot) {
  */
 export function loadSettings(env = process.env) {
   const configuredToken = (env.CLAUDE_PLUGIN_OPTION_AGENT_KEY || setting(env, 'AGENT_TOKEN') || '').trim();
-  const configuredUrl = (env.CLAUDE_PLUGIN_OPTION_SAYSO_URL || setting(env, 'BASE_URL') || setting(env, 'URL') || '').trim();
-  const dataDir = env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.sayso', 'claude-code');
+  const configuredUrl = (env.CLAUDE_PLUGIN_OPTION_AIMIRU_URL || setting(env, 'BASE_URL') || setting(env, 'URL') || '').trim();
+  const dataDir = env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.aimiru', 'claude-code');
   const saved = configuredToken ? null : readKeyFile(keyFilePath(dataDir));
   const token = configuredToken || saved?.key || '';
   // A saved key belongs to the address it was made for.
@@ -503,7 +501,7 @@ export function pluginRootOf(settings) {
 
 /** Where the plugin keeps the Aimiru routine; Claude Code loads every skills/<name>/SKILL.md (ADR-0037). */
 export function skillFile(settings) {
-  return path.join(pluginRootOf(settings), 'skills', 'sayso', 'SKILL.md');
+  return path.join(pluginRootOf(settings), 'skills', 'aimiru', 'SKILL.md');
 }
 
 /** The routine version this plugin carries, for the heartbeat's skill_version; null when the file is gone. */
@@ -512,7 +510,7 @@ export function skillVersion(settings) {
 }
 
 export function makeClient(settings, { spool = true } = {}) {
-  return createSaysoClient({
+  return createAimiruClient({
     baseUrl: settings.baseUrl,
     token: settings.token,
     connector: `${CONNECTOR}/${VERSION}`,
@@ -595,7 +593,7 @@ function pendingMac(secret, fp, data) {
   // The exact call the question was about, and what Aimiru said with it (ADR-0094): the late yes
   // quotes this call back to Claude, so nothing written to the folder can put words there.
   const call = data.call && typeof data.call === 'object' ? `\ncall:${JSON.stringify(data.call)}` : '';
-  return createHmac('sha256', `sayso-pending:${secret}`).update(`${fp}\n${data.exceptionId ?? ''}\n${data.actionId ?? ''}${words}${programs}${call}`).digest('hex');
+  return createHmac('sha256', `aimiru-pending:${secret}`).update(`${fp}\n${data.exceptionId ?? ''}\n${data.actionId ?? ''}${words}${programs}${call}`).digest('hex');
 }
 
 /**
@@ -603,7 +601,7 @@ function pendingMac(secret, fp, data) {
  * on, keyed by the Aimiru key, so nothing else can move where newness is counted from.
  */
 function sessionMac(secret, session, baseline) {
-  return createHmac('sha256', `sayso-session:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(baseline ?? null)}`).digest('hex');
+  return createHmac('sha256', `aimiru-session:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(baseline ?? null)}`).digest('hex');
 }
 
 /** How long what a session began with is kept (a session can be resumed for days). */
@@ -614,7 +612,7 @@ export const SESSION_BASELINE_TTL_MS = 14 * 24 * 3600_000;
  * session's checks name another job.
  */
 function sessionTaskMac(secret, session, taskId, ts) {
-  return createHmac('sha256', `sayso-session-task:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${String(taskId ?? '')}\n${ts}`).digest('hex');
+  return createHmac('sha256', `aimiru-session-task:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${String(taskId ?? '')}\n${ts}`).digest('hex');
 }
 
 /**
@@ -623,7 +621,7 @@ function sessionTaskMac(secret, session, taskId, ts) {
  * does not verify, so nothing but the person's own yes lets that file run as local work.
  */
 function programMac(secret, session, file, sha256, ts) {
-  return createHmac('sha256', `sayso-program:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(String(file ?? ''))}\n${sha256}\n${ts}`).digest('hex');
+  return createHmac('sha256', `aimiru-program:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(String(file ?? ''))}\n${sha256}\n${ts}`).digest('hex');
 }
 
 /** How long a yes for a program lasts at most, within its session (ADR-0090). */
@@ -631,7 +629,7 @@ export const PROGRAM_YES_TTL_MS = 24 * 3600_000;
 
 /** A MAC over a remembered cart, its store, its checkout id and when it was seen (ADR-0065). */
 function cartMac(secret, scope, reference, ts, cart) {
-  return createHmac('sha256', `sayso-cart:${secret}`).update(`${JSON.stringify(String(scope ?? ''))}\n${reference}\n${ts}\n${JSON.stringify(cart ?? null)}`).digest('hex');
+  return createHmac('sha256', `aimiru-cart:${secret}`).update(`${JSON.stringify(String(scope ?? ''))}\n${reference}\n${ts}\n${JSON.stringify(cart ?? null)}`).digest('hex');
 }
 
 /** The file a store's cart is kept in: one per store (ucpScope) and checkout id. */
@@ -1047,23 +1045,23 @@ export function supportsBlockOnFailure(version) {
  * Environment settings that change how the check itself runs: Node options can load code into the
  * check, plugin variables can replace its key, address or files, CLAUDE_CONFIG_DIR moves Claude
  * Code's settings folder, with the plugins installed there and the settings files Aimiru guards, and
- * those of Aimiru's own settings (AIMIRU_ or SAYSO_) that send every check to another address with
+ * those of Aimiru's own settings (AIMIRU_) that send every check to another address with
  * another key (AGENT_TOKEN, BASE_URL, URL, read before the saved key; PLUGIN_, the tool server's),
  * file the work under another project (PROJECT, which rules can name), or say which Claude Code runs
  * (CLAUDE_VERSION, CLAUDE_BIN, which decide whether a failed check blocks) (agent-experience review
  * of wk/connectors-flow). Settings that only shorten a wait or ask for more records stay free to change.
  */
-export const HIJACK_ENV_RE = /^(NODE_OPTIONS|NODE_PATH|CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_(OPTION_[A-Z0-9_]+|ROOT|DATA)|(AIMIRU|SAYSO)_(AGENT_TOKEN|BASE_URL|URL|PROJECT|CLAUDE_VERSION|CLAUDE_BIN|PLUGIN_[A-Z0-9_]+))$/i;
+export const HIJACK_ENV_RE = /^(NODE_OPTIONS|NODE_PATH|CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_(OPTION_[A-Z0-9_]+|ROOT|DATA)|AIMIRU_(AGENT_TOKEN|BASE_URL|URL|PROJECT|CLAUDE_VERSION|CLAUDE_BIN|PLUGIN_[A-Z0-9_]+))$/i;
 
 /** True when these settings turn Aimiru off, or change how its check runs. */
-export function turnsSaysoOff(settingsJson) {
+export function turnsAimiruOff(settingsJson) {
   if (!settingsJson || typeof settingsJson !== 'object') return false;
   if (settingsJson.disableAllHooks === true) return true;
   const enabled = settingsJson.enabledPlugins;
   if (enabled && typeof enabled === 'object') {
     for (const [id, on] of Object.entries(enabled)) {
-      // The plugin under its published name (aimiru@<marketplace>) or the name it had before.
-      if (on === false && SAYSO_PLUGIN_NAMES.some((name) => new RegExp(`^${name}(@|$)`, 'i').test(id))) return true;
+      // The plugin under its published name, from any marketplace (aimiru@<marketplace>).
+      if (on === false && AIMIRU_PLUGIN_NAMES.some((name) => new RegExp(`^${name}(@|$)`, 'i').test(id))) return true;
     }
   }
   const env = settingsJson.env;

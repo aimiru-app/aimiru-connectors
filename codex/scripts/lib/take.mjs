@@ -26,7 +26,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { jobPrompt, notPersonsJob } from '../vendor/messages.mjs';
 import { redactContacts } from '../vendor/contacts.mjs';
-import { personsOwnJob, redactSecrets, setting, sha256Hex, sleep, taskIdOf, truncate } from '../vendor/sayso-client.mjs';
+import { personsOwnJob, redactSecrets, setting, sha256Hex, sleep, taskIdOf, truncate } from '../vendor/aimiru-client.mjs';
 import { appDirOf, codexSettingsFacts, entryTrust, findOurHook, hookKeyOf, isOurExactCheck } from './install.mjs';
 import { createProgress, noteForEvent } from './progress.mjs';
 import { followRefusals } from './refusals.mjs';
@@ -93,7 +93,7 @@ export function gitRootOf(dir) {
   return null;
 }
 
-/** The Codex program to run: AIMIRU_CODEX_BIN (or SAYSO_CODEX_BIN), else codex on PATH. */
+/** The Codex program to run: AIMIRU_CODEX_BIN, else codex on PATH. */
 export function codexBinOf(env = process.env) {
   return setting(env, 'CODEX_BIN') || 'codex';
 }
@@ -372,11 +372,11 @@ async function takeOnce({ env, dir, print, spawn, stop, quiet = false, limitMs }
       if (!quiet) print(JOB_WORDS.takePaused);
       return { kind: 'paused', code: 0 };
     }
-    if (taken.kind === 'http' && (taken.status === 403 || taken.status === 404) && taken.fromSayso !== false) {
+    if (taken.kind === 'http' && (taken.status === 403 || taken.status === 404) && taken.fromAimiru !== false) {
       print(JOB_WORDS.takeNotOpen);
       return { kind: 'fatal', code: 1 };
     }
-    if (taken.kind === 'http' && taken.status === 401 && taken.fromSayso !== false) {
+    if (taken.kind === 'http' && taken.status === 401 && taken.fromAimiru !== false) {
       print(taken.code === 'demo_ended' ? client.demoEndedText : JOB_WORDS.takeReconnect(INSTALL));
       return { kind: 'fatal', code: 1 };
     }

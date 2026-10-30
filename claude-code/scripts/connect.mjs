@@ -41,8 +41,9 @@ import {
   writeKeyFile,
   writePendingPairing,
 } from './vendor/pair.mjs';
-import { normaliseBaseUrl, setting } from './vendor/sayso-client.mjs';
+import { normaliseBaseUrl, setting } from './vendor/aimiru-client.mjs';
 import { describeAsk, markAsked, readImportState } from './vendor/import-lines.mjs';
+import { refreshHelper } from './activity.mjs';
 
 const PENDING_FILE = 'pairing.json';
 /** Aimiru's own address: where connect pairs when nothing names another (Mac run part 1, item 1). */
@@ -87,7 +88,7 @@ export function waitSecondsOf(args, env) {
 export function addressOf({ args, env, settings, pending, now = Date.now() }) {
   if (args.url) return args.url;
   if (pendingLasts(pending, now)) return pending.base_url;
-  return env.CLAUDE_PLUGIN_OPTION_SAYSO_URL || savedPluginOption(env, 'sayso_url') || setting(env, 'BASE_URL') || setting(env, 'URL') || settings.baseUrl || DEFAULT_ADDRESS;
+  return env.CLAUDE_PLUGIN_OPTION_AIMIRU_URL || savedPluginOption(env, 'aimiru_url') || setting(env, 'BASE_URL') || setting(env, 'URL') || settings.baseUrl || DEFAULT_ADDRESS;
 }
 
 /**
@@ -185,6 +186,8 @@ export async function connect({ argv = process.argv.slice(2), env = process.env,
   }
 
   writeKeyFile(keyFile, { agentKey: result.agentKey, baseUrl: result.baseUrl, agentId: result.agentId, name: result.name });
+  // The activity report's helper reads this key: one an earlier release wrote may not read it.
+  refreshHelper(path.dirname(keyFile));
   dropPendingPairing(pendingFile);
   say(PAIR_MESSAGES.connected(result.name));
   say(PAIR_MESSAGES.savedKey(keyFile));

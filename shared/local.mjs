@@ -17,7 +17,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { READ_ONLY_BUILTINS, splitMcpToolName } from './classify.mjs';
-import { createSpool, readReach, setting, sha256Hex, sleep } from './sayso-client.mjs';
+import { createSpool, readReach, setting, sha256Hex, sleep } from './aimiru-client.mjs';
 
 /**
  * The only (class, resource) pairs that can ever be decided on this computer. The same list is in
@@ -55,7 +55,7 @@ const CLAUDE_CODE_TOOLS = new Set([
 /** Codex's own shell and file changes. */
 const CODEX_TOOLS = new Set(['Bash', 'apply_patch']);
 
-/** False when the person turned reads decided here off: AIMIRU_LOCAL_READS=0 (or SAYSO_LOCAL_READS=0). */
+/** False when the person turned reads decided here off: AIMIRU_LOCAL_READS=0. */
 export function localReadsOn(env = process.env) {
   return String(setting(env, 'LOCAL_READS') ?? '').trim() !== '0';
 }
@@ -172,7 +172,7 @@ export function createLocalState({ dataDir, token = '', baseUrl = null } = {}) {
   const key = typeof token === 'string' ? token.trim() : '';
   const base = typeof baseUrl === 'string' ? baseUrl : null;
 
-  const macOf = (body) => createHmac('sha256', `sayso-local:${key}`).update(JSON.stringify(body)).digest('hex');
+  const macOf = (body) => createHmac('sha256', `aimiru-local:${key}`).update(JSON.stringify(body)).digest('hex');
 
   /**
    * The stored snapshot when its file verifies and was made for this key and this Aimiru, else null:
@@ -390,7 +390,7 @@ export async function refreshLocal(client, state, { timeoutMs = 3_000 } = {}) {
       else state.remove();
       return { ok: true, me: d };
     }
-    if (r.kind === 'http' && r.fromSayso !== false && (r.status === 401 || r.status === 403)) state.remove();
+    if (r.kind === 'http' && r.fromAimiru !== false && (r.status === 401 || r.status === 403)) state.remove();
     return { ok: false, status: r.status ?? 0 };
   } finally {
     state.unlockRefresh();
@@ -462,7 +462,7 @@ export async function flushLocal(client, state, { budgetMs = 5_000, force = fals
           return 'retry';
         });
       }
-      const fromAimiru = r.kind === 'http' && r.fromSayso !== false;
+      const fromAimiru = r.kind === 'http' && r.fromAimiru !== false;
       if (fromAimiru && r.status === 429) {
         forget = true;
         return batch.map(() => 'retry');

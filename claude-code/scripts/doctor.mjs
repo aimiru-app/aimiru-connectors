@@ -29,11 +29,13 @@ import {
   stateStore,
   takesJobsHere,
 } from './lib/runtime.mjs';
-import { PAUSE_TRACE_FILE, createSpool, isDemoEnded, readTrace } from './vendor/sayso-client.mjs';
+import { PAUSE_TRACE_FILE, createSpool, isDemoEnded, readTrace } from './vendor/aimiru-client.mjs';
 import { CLAUDE_CODE_CONNECT, MESSAGES, clockOf, reachFinding, tierWord } from './vendor/messages.mjs';
 import { localReadsOn } from './vendor/local.mjs';
 import { pauseHoldOn } from './vendor/pause-watch.mjs';
 import { readPermissionSettings, settingsFiles } from './lib/native-prompt.mjs';
+import { earlierInstalls } from './vendor/runner.mjs';
+import { RUNNER_LINE } from './runner.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(here, '..');
@@ -78,7 +80,7 @@ async function main() {
     fix('plugin', 'The plugin files are missing.', reinstall);
   }
 
-  // 3b. The Aimiru routine (skills/sayso/SKILL.md), which the heartbeat reports (ADR-0037)
+  // 3b. The Aimiru routine (skills/aimiru/SKILL.md), which the heartbeat reports (ADR-0037)
   const routine = skillVersion({ ...settings, pluginRoot });
   if (routine) ok('routine', `Claude Code has the Aimiru routine (version ${routine}): when to check with Aimiru, and what to do while a question to you is open.`);
   else fix('routine', 'The Aimiru routine is missing from the plugin, so Aimiru shows that Claude Code has not loaded it.', 'Update: claude plugin update aimiru@aimiru');
@@ -127,7 +129,7 @@ async function main() {
         const min = me.data?.connector_min_versions?.['claude-code'];
         if (min && compareVersions(VERSION, min) < 0) fix('version', `Aimiru asks for Aimiru for Claude Code ${min} or later.`, 'Update: claude plugin update aimiru@aimiru');
         if (me.data?.doctor_report === true) reportTo = client;
-      } else if (me.fromSayso === false) {
+      } else if (me.fromAimiru === false) {
         fix('connection', `Something between this computer and Aimiru refused the request (${me.status}), so Aimiru never saw it.`, 'Check the Aimiru address, and any firewall or network filter on this computer.');
       } else if (isDemoEnded(me)) {
         // Wave 10, snag 12: the key belonged to a demo whose time is over.
@@ -166,6 +168,12 @@ async function main() {
   else note('jobs', MESSAGES.jobsOn(AGENT_LABEL));
   // A brief the start missed and the person's message brought (CC6) says so.
   if (last?.brief?.state === 'given') note('brief', last.brief.at_prompt === true ? MESSAGES.briefGivenAtPrompt(AGENT_LABEL) : MESSAGES.briefGiven(AGENT_LABEL));
+
+  // 7c. Another connector on this computer still on an earlier Aimiru (ADR-0164): until it is
+  // updated, its files and Claude Code's are not guarded from each other.
+  for (const e of earlierInstalls(process.env, { runnerLine: `${RUNNER_LINE} on` })) {
+    if (e.connector !== 'claude-code') fix(`earlier_${e.connector.replace(/-/g, '_')}`, e.text);
+  }
 
   // 8. Waiting records
   const waiting = createSpool(settings.dataDir).size();

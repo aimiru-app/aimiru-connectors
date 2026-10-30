@@ -28,7 +28,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { notPersonsJob } from './messages.mjs';
 import { redactContacts } from './contacts.mjs';
-import { personsOwnJob, redactSecrets, setting, sha256Hex, taskIdOf, truncate } from './sayso-client.mjs';
+import { personsOwnJob, redactSecrets, setting, sha256Hex, taskIdOf, truncate } from './aimiru-client.mjs';
 
 /** The LaunchAgent's label, and the name launchd gives the runner it starts (XPC_SERVICE_NAME). */
 export const LABEL = 'app.aimiru.runner';
@@ -119,13 +119,16 @@ function homeOf(env) {
 
 /**
  * The runner's own folder: its id, settings, copy of the program, log and state. Under Aimiru's own
- * folder (~/.sayso), which every connector's check protects by name, in this release and the ones
- * before it (classify.mjs isProtectedPath): launchd starts the copy at every login with the agents'
- * keys, so an agent may not change, replace or point it elsewhere without an ask, and the change is
- * held when Aimiru cannot be asked (security review of wk/runner).
+ * folder (~/.aimiru), which every connector's check of this release protects by name, and by its shape
+ * (<home>/.<word>/runner) and by where the LaunchAgent starts it (classify.mjs isProtectedPath,
+ * liveCopyFolders): launchd starts the copy at every login with the agents' keys, so an agent may not
+ * change, replace or point it elsewhere without an ask, and the change is held when Aimiru cannot be
+ * asked (security review of wk/runner). A check of 0.3.0-rc.2 or older protects only the folder of
+ * its own time, not this one (ADR-0164): every connector on a computer moves in one sitting, and
+ * earlierInstalls names one that has not.
  */
 export function runnerHome(env = process.env) {
-  return path.join(homeOf(env), '.sayso', 'runner');
+  return path.join(homeOf(env), '.aimiru', 'runner');
 }
 
 export function launchAgentFile(env = process.env) {
@@ -483,7 +486,7 @@ export function createRunner(o) {
       if (stop.aborted) break;
       const pace = POLL_MS + Math.floor(random() * JITTER_MS);
       if (!taken.ok) {
-        const fromAimiru = taken.kind === 'http' && taken.fromSayso !== false;
+        const fromAimiru = taken.kind === 'http' && taken.fromAimiru !== false;
         if (fromAimiru && taken.status === 423) {
           backoff = POLL_MS;
           say('paused', RUNNER_WORDS.paused);
@@ -663,7 +666,7 @@ export function claudePluginInstall(env = process.env) {
   const all = record && typeof record === 'object' ? (record.plugins ?? record) : null;
   if (!all || typeof all !== 'object') return null;
   const ids = Object.keys(all)
-    .filter((id) => /^(aimiru|sayso)(@|$)/i.test(id))
+    .filter((id) => /^aimiru(@|$)/i.test(id))
     .sort((a, b) => (a.startsWith('aimiru@aimiru') ? -1 : b.startsWith('aimiru@aimiru') ? 1 : a.localeCompare(b)));
   const realPlugins = realOrNull(plugins);
   for (const id of ids) {
@@ -688,9 +691,9 @@ export function claudePluginRoot(env = process.env) {
   return claudePluginInstall(env)?.root ?? null;
 }
 
-/** Codex's own copy of Aimiru's check, as `aimiru-codex init` writes it (under ~/.sayso/codex). */
+/** Codex's own copy of Aimiru's check, as `aimiru-codex init` writes it (under ~/.aimiru/codex). */
 function codexAppDir(env) {
-  return path.join(setting(env, 'CODEX_DATA') || path.join(homeOf(env), '.sayso', 'codex'), 'app');
+  return path.join(setting(env, 'CODEX_DATA') || path.join(homeOf(env), '.aimiru', 'codex'), 'app');
 }
 
 /** Codex's own copy of Aimiru's check (`aimiru-codex init` writes it): its take path, or null. */
@@ -701,13 +704,125 @@ export function codexAppAgentFile(env = process.env) {
   return file && realApp && inside(file, realApp) ? file : null;
 }
 
+/** The first release whose files are all under ~/.aimiru, and whose checks protect them (ADR-0164). */
+export const MOVED_IN = '0.3.0-rc.3';
+
+/** -1, 0 or 1 for two versions like 0.3.0-rc.2, as semver orders them: a pre-release comes before its release. */
+export function compareReleases(a, b) {
+  const parse = (v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(v ?? '').trim());
+    return m ? { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : null } : null;
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return 0;
+  for (let i = 0; i < 3; i += 1) if (x.nums[i] !== y.nums[i]) return x.nums[i] < y.nums[i] ? -1 : 1;
+  if (!x.pre || !y.pre) return x.pre === y.pre ? 0 : x.pre ? -1 : 1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i += 1) {
+    const p = x.pre[i];
+    const q = y.pre[i];
+    if (p === undefined || q === undefined) return p === undefined ? -1 : 1;
+    const np = /^\d+$/.test(p);
+    const nq = /^\d+$/.test(q);
+    if (np && nq && Number(p) !== Number(q)) return Number(p) < Number(q) ? -1 : 1;
+    if (np !== nq) return np ? -1 : 1;
+    if (!np && p !== q) return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+/** The version of Aimiru's plugin that Claude Code installed (installed_plugins.json, else its plugin.json), or null. */
+function claudePluginVersions(env) {
+  const record = readJson(path.join(claudeConfigDir(env), 'plugins', 'installed_plugins.json'));
+  const all = record && typeof record === 'object' ? (record.plugins ?? record) : null;
+  if (!all || typeof all !== 'object') return [];
+  const out = [];
+  for (const id of Object.keys(all).filter((k) => /^aimiru(@|$)/i.test(k))) {
+    for (const e of Array.isArray(all[id]) ? all[id] : [all[id]]) {
+      const own = typeof e?.installPath === 'string' ? readJson(path.join(e.installPath, '.claude-plugin', 'plugin.json'))?.version : null;
+      const v = typeof e?.version === 'string' ? e.version : own;
+      if (typeof v === 'string') out.push(v);
+    }
+  }
+  return out;
+}
+
+/** The <dot folder>/codex of each check copy Codex's hooks.json runs in the installer's own shape. */
+function codexCopyFolders(env) {
+  const codexHome = env.CODEX_HOME || path.join(homeOf(env), '.codex');
+  const data = readJson(path.join(codexHome, 'hooks.json'));
+  const out = [];
+  for (const groups of Object.values(data?.hooks && typeof data.hooks === 'object' ? data.hooks : {})) {
+    for (const g of Array.isArray(groups) ? groups : []) {
+      for (const h of Array.isArray(g?.hooks) ? g.hooks : []) {
+        const m = /-u NODE_OPTIONS -u NODE_PATH "[^"]+" "([^"]+)"/.exec(String(h?.command ?? ''));
+        const parts = m ? m[1].split('/') : [];
+        const n = parts.length;
+        if (n >= 5 && parts[n - 2] === 'app' && parts[n - 3] === 'codex' && /^\.[A-Za-z0-9_-]+$/.test(parts[n - 4])) out.push(parts.slice(0, n - 2).join('/'));
+      }
+    }
+  }
+  return out;
+}
+
+/** The runner folder the LaunchAgent starts its copy from (<folder>/app/runner.mjs), or null. */
+function launchedRunnerHome(env) {
+  let text = '';
+  try {
+    text = fs.readFileSync(launchAgentFile(env), 'utf8');
+  } catch {
+    return null;
+  }
+  for (const m of text.matchAll(/<string>([^<]*)<\/string>/g)) {
+    const s = m[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+    const at = /^(\/.+)\/app\/runner\.mjs$/.exec(s);
+    if (at) return at[1];
+  }
+  return null;
+}
+
+/** What each earlier install says, with the line that updates it (docs/04 words). */
+export const EARLIER_WORDS = Object.freeze({
+  'claude-code': (line) => `Aimiru for Claude Code on this computer is an earlier version, so it and your other agents do not guard each other's Aimiru files until it is updated: ${line}`,
+  codex: (line) => `Aimiru for Codex on this computer is an earlier version, so it and your other agents do not guard each other's Aimiru files until it is updated: ${line}`,
+  runner: (line) => `The runner on this computer still starts an earlier version of Aimiru. Turn it on again to update it: ${line}`,
+});
+
+/** The lines that update each one: Claude Code's plugin, Codex's check (no tag, no version). */
+const UPDATE_LINES = Object.freeze({
+  'claude-code': 'claude plugin marketplace update aimiru, then claude plugin update aimiru@aimiru, then restart Claude Code',
+  codex: 'npx aimiru-codex init',
+});
+
+/**
+ * The connectors on this computer still on an Aimiru from before its files moved to ~/.aimiru
+ * (ADR-0164), read from where each is started: Claude Code's installed plugin by its version, Codex's
+ * hooks.json by the folder its check runs from, and the runner's LaunchAgent by the folder its copy
+ * is in. A check of 0.3.0-rc.2 or older protects only the folder of its own time, and one of this
+ * release protects the earlier one only by shape, so until every connector here is updated, one
+ * agent may change another's Aimiru files without an ask (security review of the rename). Each with
+ * what to tell the person. Empty when there is none.
+ * @param {Record<string, string|undefined>} [env]
+ * @param {{runnerLine?: string}} [o] how the person turns the runner on again with this connector
+ * @returns {{connector: 'claude-code'|'codex'|'runner', text: string}[]}
+ */
+export function earlierInstalls(env = process.env, { runnerLine = 'npx aimiru-codex runner on' } = {}) {
+  const out = [];
+  if (claudePluginVersions(env).some((v) => compareReleases(v, MOVED_IN) < 0)) out.push({ connector: 'claude-code', text: EARLIER_WORDS['claude-code'](UPDATE_LINES['claude-code']) });
+  const codexData = path.resolve(setting(env, 'CODEX_DATA') || path.join(homeOf(env), '.aimiru', 'codex'));
+  if (codexCopyFolders(env).some((d) => path.resolve(d) !== codexData)) out.push({ connector: 'codex', text: EARLIER_WORDS.codex(UPDATE_LINES.codex) });
+  const launched = launchedRunnerHome(env);
+  if (launched && path.resolve(launched) !== path.resolve(runnerHome(env))) out.push({ connector: 'runner', text: EARLIER_WORDS.runner(runnerLine) });
+  return out;
+}
+
 /** The person-facing name of each connector that can turn the runner on. */
 const CONNECTOR_LABELS = Object.freeze({ 'claude-code': 'Claude Code', codex: 'Codex' });
 
 /**
  * The scripts of the connector that turns the runner on, as that connector is installed on this
  * computer now, in the folder its check runs from (both protected by name): Claude Code's plugin
- * folder (claudePluginInstall) or Codex's own copy (~/.sayso/codex/app). Null when there is none.
+ * folder (claudePluginInstall) or Codex's own copy (~/.aimiru/codex/app). Null when there is none.
  */
 export function installedScriptsOf(connector, env = process.env) {
   if (connector === 'claude-code') {
@@ -799,8 +914,8 @@ function xml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-/** Each setting Aimiru reads under both its names (AIMIRU_ and SAYSO_). */
-const bothNames = (names) => names.flatMap((n) => [`AIMIRU_${n}`, `SAYSO_${n}`]);
+/** Each setting Aimiru reads, by its name in the environment (AIMIRU_<name>). */
+const settingNames = (names) => names.map((n) => `AIMIRU_${n}`);
 
 /**
  * What the LaunchAgent sets to empty, so nothing launchd hands every program at login (`launchctl
@@ -818,11 +933,11 @@ export const BLANKED_ENV = Object.freeze([
   'CLAUDE_PLUGIN_ROOT',
   'CLAUDE_PLUGIN_DATA',
   'CLAUDE_PLUGIN_OPTION_AGENT_KEY',
-  'CLAUDE_PLUGIN_OPTION_SAYSO_URL',
-  ...bothNames(['AGENT_TOKEN', 'BASE_URL', 'URL', 'PROJECT', 'CLAUDE_VERSION', 'CLAUDE_BIN', 'CODEX_BIN']),
+  'CLAUDE_PLUGIN_OPTION_AIMIRU_URL',
+  ...settingNames(['AGENT_TOKEN', 'BASE_URL', 'URL', 'PROJECT', 'CLAUDE_VERSION', 'CLAUDE_BIN', 'CODEX_BIN']),
   'CLAUDE_CONFIG_DIR',
   'CODEX_HOME',
-  ...bothNames(['CODEX_DATA']),
+  ...settingNames(['CODEX_DATA']),
 ]);
 
 /**
@@ -874,7 +989,7 @@ ${envXml}
 }
 
 /** The environment a runner keeps from the person's own at `on`: folders only (never a key or an address). */
-export const KEPT_ENV = Object.freeze(['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'AIMIRU_CODEX_DATA', 'SAYSO_CODEX_DATA']);
+export const KEPT_ENV = Object.freeze(['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'AIMIRU_CODEX_DATA']);
 
 /**
  * True when launchctl may be used for this plist: on a Mac, and only for the LaunchAgents folder of

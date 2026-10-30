@@ -35,7 +35,7 @@ Then start Claude Code, or restart it if it is open, and run `/aimiru:connect` i
 ### Codex
 
 ```bash
-npx aimiru-codex init --aimiru-url https://aimiru.app
+npx aimiru-codex init
 ```
 
 It opens Aimiru's page to connect it in your browser and shows a code and the same link, which you can open on your phone instead: pick the same code and tap Connect. Then open Codex, type `/hooks` and trust "Checking with Aimiru". Codex keeps its own sign-in; we suggest Sign in with ChatGPT, so Codex uses your own plan. Aimiru never asks for or holds your OpenAI key; the check talks to Aimiru with its own key only. Details in [`codex/README.md`](codex/README.md).
@@ -47,7 +47,7 @@ A new version goes out first as a pre-release, on the `next` channel: the `next`
 ```bash
 claude plugin marketplace add aimiru-app/aimiru-connectors#next
 claude plugin install aimiru@aimiru
-npx aimiru-codex@next init --aimiru-url https://aimiru.app
+npx aimiru-codex@next init
 ```
 
 To switch channel, run `claude plugin marketplace remove aimiru`, then the other channel's two lines, then restart Claude Code and run `/aimiru:connect` again: removing the marketplace removes the plugin and the key it saved. For Codex, run the other channel's line.
@@ -59,7 +59,7 @@ The lines that take each connector out again. When a demo ends, the connector re
 | Agent | Run |
 |---|---|
 | Claude Code | `claude plugin uninstall aimiru@aimiru`, then `claude plugin marketplace remove aimiru` (either channel) |
-| Codex | `npx aimiru-codex uninstall`, then delete `~/.sayso/codex`, which holds your key and the copy of the check (either channel) |
+| Codex | `npx aimiru-codex uninstall`, then delete `~/.aimiru/codex`, which holds your key and the copy of the check (either channel) |
 
 ## When Aimiru cannot be reached
 

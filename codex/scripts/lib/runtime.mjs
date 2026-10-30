@@ -7,10 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { readKeyFile } from '../vendor/pair.mjs';
 import { createPauseWatch } from '../vendor/pause-watch.mjs';
-import { ASK_HOLD_MS, createSaysoClient, setting, sha256Hex } from '../vendor/sayso-client.mjs';
+import { ASK_HOLD_MS, createAimiruClient, setting, sha256Hex } from '../vendor/aimiru-client.mjs';
 
 export const CONNECTOR = 'codex';
-export const VERSION = '0.3.0-rc.2';
+export const VERSION = '0.3.0-rc.3';
 /** The npm package (ADR-0091): unscoped, a command people run with npx, like aimiru-mcp-proxy. */
 export const PACKAGE_NAME = 'aimiru-codex';
 /** The line that removes the check (wave 10, shapes 3), word for word as the demo page and the README show it. */
@@ -89,12 +89,12 @@ export const DOWN_WINDOW_MS = 30_000;
  */
 export const REPORT_EVERY_MS = 6 * 3600_000;
 
-/** The run's budget: AIMIRU_HOOK_BUDGET_MS (or SAYSO_) can only make it shorter, never longer than HOOK_BUDGET_MS. */
+/** The run's budget: AIMIRU_HOOK_BUDGET_MS can only make it shorter, never longer than HOOK_BUDGET_MS. */
 export function hookBudgetMs(env = process.env) {
   return Math.min(HOOK_BUDGET_MS, intFromEnv(env, 'HOOK_BUDGET_MS', HOOK_BUDGET_MS));
 }
 
-/** A positive number setting (AIMIRU_<name>, or SAYSO_<name>), else the fallback. */
+/** A positive number setting (AIMIRU_<name>), else the fallback. */
 function intFromEnv(env, name, fallback) {
   const v = Number(setting(env, name));
   return Number.isFinite(v) && v > 0 ? v : fallback;
@@ -104,9 +104,9 @@ function homeOf(env) {
   return env.HOME || env.USERPROFILE || os.homedir();
 }
 
-/** Where this connector keeps its key, its waiting questions and its records: ~/.sayso/codex (AIMIRU_CODEX_DATA or SAYSO_CODEX_DATA moves it). */
+/** Where this connector keeps its key, its waiting questions and its records: ~/.aimiru/codex (AIMIRU_CODEX_DATA moves it). */
 export function dataDirOf(env = process.env) {
-  return setting(env, 'CODEX_DATA') || path.join(homeOf(env), '.sayso', 'codex');
+  return setting(env, 'CODEX_DATA') || path.join(homeOf(env), '.aimiru', 'codex');
 }
 
 /** Codex's own folder (CODEX_HOME, else ~/.codex), where its user settings and hooks.json live. */
@@ -121,9 +121,9 @@ export function keyFilePath(dataDir) {
 }
 
 /**
- * Settings: the key from AIMIRU_AGENT_TOKEN (or SAYSO_AGENT_TOKEN) or the key file init saved
+ * Settings: the key from AIMIRU_AGENT_TOKEN or the key file init saved
  * (owner-only, with the address it was made for), the address from AIMIRU_BASE_URL (or
- * SAYSO_BASE_URL, AIMIRU_URL, SAYSO_URL) or that file.
+ * AIMIRU_URL) or that file.
  */
 export function loadSettings(env = process.env) {
   const configuredToken = (setting(env, 'AGENT_TOKEN') || '').trim();
@@ -146,7 +146,7 @@ export function loadSettings(env = process.env) {
 }
 
 export function makeClient(settings, { spool = true } = {}) {
-  return createSaysoClient({
+  return createAimiruClient({
     baseUrl: settings.baseUrl,
     token: settings.token,
     connector: `${CONNECTOR}/${VERSION}`,
@@ -506,7 +506,7 @@ export function callFolderOf(input, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Local state in ~/.sayso/codex
+// Local state in ~/.aimiru/codex
 // ---------------------------------------------------------------------------
 
 function safeName(s) {
@@ -539,7 +539,7 @@ function pendingMac(secret, fp, data) {
   const call = data.call && typeof data.call === 'object' ? `\ncall:${JSON.stringify(data.call)}` : '';
   // The programs the question was about, by file and content (CN6): a yes is for those only.
   const programs = Array.isArray(data.programs) ? `\nprograms:${JSON.stringify(data.programs)}` : '';
-  return createHmac('sha256', `sayso-pending:${secret}`).update(`${fp}\n${data.exceptionId ?? ''}\n${data.actionId ?? ''}${words}${call}${programs}`).digest('hex');
+  return createHmac('sha256', `aimiru-pending:${secret}`).update(`${fp}\n${data.exceptionId ?? ''}\n${data.actionId ?? ''}${words}${call}${programs}`).digest('hex');
 }
 
 function macEqual(a, b) {
@@ -716,7 +716,7 @@ export function checkReport({ status = {}, input = {}, env = process.env } = {})
       hook_ran: true,
       hooks_enabled: true,
       // The guard turns a check that dies or runs out of time into a refusal (guard.mjs).
-      on_failure_block: env.SAYSO_CODEX_GUARD === '1',
+      on_failure_block: env.AIMIRU_CODEX_GUARD === '1',
       covers: [...COVERS],
       ...(typeof input.permission_mode === 'string' ? { permission_mode: input.permission_mode.slice(0, 40) } : {}),
       sandbox: ['on', 'off', 'unknown'].includes(sandbox) ? sandbox : 'unknown',

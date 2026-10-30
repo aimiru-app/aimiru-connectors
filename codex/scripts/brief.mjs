@@ -16,11 +16,11 @@
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { briefOf } from './vendor/sayso-client.mjs';
+import { briefOf } from './vendor/aimiru-client.mjs';
 import { findOurBrief } from './lib/install.mjs';
 import { installReport, loadSettings, makeClient, readStdinJson, reportedSinceInstall, stateStore } from './lib/runtime.mjs';
 
-/** The folder this runs from (the copy init made, ~/.sayso/codex/app). */
+/** The folder this runs from (the copy init made, ~/.aimiru/codex/app). */
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /** The most the brief may take: Codex waits for this entry before the session's first turn. */

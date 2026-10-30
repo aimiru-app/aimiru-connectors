@@ -34,13 +34,13 @@
 //
 // With nothing to say, or no answer, it prints nothing: the person's message is never held up.
 
-import { saysoToolName } from './vendor/classify.mjs';
+import { aimiruToolName } from './vendor/classify.mjs';
 import { BRIEF_CHANGED, BRIEF_EMPTIED, lateYesNextMessage, taskContext } from './vendor/messages.mjs';
-import { briefOf } from './vendor/sayso-client.mjs';
+import { briefOf } from './vendor/aimiru-client.mjs';
 import { fitContext, isInteractive, loadSettings, makeClient, openTaskOf, pausedHere, quotedStep, readStdinJson, stateStore, takesTasksHere, writeJson } from './lib/runtime.mjs';
 
 /** How Claude names the Aimiru tools this plugin's own server gives it. */
-const SAYSO_TOOL_PREFIX = saysoToolName('');
+const AIMIRU_TOOL_PREFIX = aimiruToolName('');
 /** One look at a held job, inside the run's 2 s. */
 const JOB_MS = 1_200;
 
@@ -105,7 +105,7 @@ function noteBriefAtPrompt(store, b) {
 async function jobAgain(client, store, session, taskId) {
   const r = await client.getTask(taskId, { timeoutMs: JOB_MS }).catch(() => null);
   if (!r?.ok) {
-    if (r?.kind === 'http' && (r.status === 403 || r.status === 404) && r.fromSayso !== false) {
+    if (r?.kind === 'http' && (r.status === 403 || r.status === 404) && r.fromAimiru !== false) {
       store.clearRegive(session);
       store.clearSessionTask(session, taskId);
     }
@@ -117,7 +117,7 @@ async function jobAgain(client, store, session, taskId) {
     store.clearSessionTask(session, taskId);
     return null;
   }
-  return taskContext(task, { recordTool: `${SAYSO_TOOL_PREFIX}record`, reportTool: `${SAYSO_TOOL_PREFIX}report_cant`, progress: true });
+  return taskContext(task, { recordTool: `${AIMIRU_TOOL_PREFIX}record`, reportTool: `${AIMIRU_TOOL_PREFIX}report_cant`, progress: true });
 }
 
 async function main() {

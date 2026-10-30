@@ -1,4 +1,4 @@
-// GENERATED COPY of connectors/shared/sayso-client.mjs. Do not edit here: edit shared/ and run `node scripts/sync-shared.mjs`.
+// GENERATED COPY of connectors/shared/aimiru-client.mjs. Do not edit here: edit shared/ and run `node scripts/sync-shared.mjs`.
 // Aimiru Agent API client for connectors (wire contract v1, workers/agent-api/CONTRACT.md).
 //
 // Zero dependencies: Node 18+ built-ins only (fetch, AbortSignal.timeout, node:crypto, node:fs).
@@ -22,16 +22,12 @@ import { DEFAULT_CONNECT, MESSAGES, undoLineFor } from './messages.mjs';
 
 export const CONTRACT_VERSION = 'v1';
 
-/**
- * The prefixes a connector's settings may carry in the environment, newest first: AIMIRU_, the
- * product's name since 22 Oct 2026 (ADR-0093), then SAYSO_, its name before, so every setting made
- * before the rename keeps working.
- */
-export const SETTING_PREFIXES = Object.freeze(['AIMIRU_', 'SAYSO_']);
+/** The prefix a connector's settings carry in the environment: AIMIRU_<name>. */
+export const SETTING_PREFIXES = Object.freeze(['AIMIRU_']);
 
 /**
  * A setting from the environment by its name without the prefix (BASE_URL, AGENT_TOKEN, ...):
- * AIMIRU_<name> when it is set and not blank, else SAYSO_<name>. Undefined when neither is set.
+ * AIMIRU_<name> when it is set and not blank. Undefined when it is not set.
  */
 export function setting(env, name) {
   for (const prefix of SETTING_PREFIXES) {
@@ -41,7 +37,7 @@ export function setting(env, name) {
   return undefined;
 }
 
-/** The environment variable a setting was read from: the first one set, else the AIMIRU_ name. */
+/** The environment variable a setting is read from: AIMIRU_<name>. */
 export function settingName(env, name) {
   for (const prefix of SETTING_PREFIXES) {
     const v = env?.[`${prefix}${name}`];
@@ -86,7 +82,7 @@ export const INSTALL_SOURCES = Object.freeze([
 
 /**
  * Works out the install source on this computer, never over the network:
- *   1. AIMIRU_INSTALL_SOURCE (or SAYSO_INSTALL_SOURCE), when it names one of INSTALL_SOURCES (an installer, or pairing,
+ *   1. AIMIRU_INSTALL_SOURCE, when it names one of INSTALL_SOURCES (an installer, or pairing,
  *      sets it; anything else is ignored);
  *   2. `hint`, what the host says about the install (OpenClaw's own install record);
  *   3. the connector's own folder: inside ~/.claude/plugins (the Claude Code plugin
@@ -154,7 +150,7 @@ export function normaliseBaseUrl(raw) {
  * computer and Aimiru (a firewall, a login wall, the host's edge refusing the request, seen live as an
  * HTML page with Cloudflare error 1010): Aimiru never saw the request, so it is not Aimiru's answer.
  */
-export function isSaysoAnswer(data) {
+export function isAimiruAnswer(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
   return (typeof data.error?.code === 'string' && data.error.code !== '') || typeof data.decision === 'string' || typeof data.explain === 'string';
 }
@@ -470,7 +466,7 @@ export function briefOf(r) {
     return { state: 'given', text: b.text, version: b.version, count };
   }
   if (r.ok === false && r.kind === 'http' && r.status === 304) return none('same');
-  if (r.ok === false && r.kind === 'http' && (r.status === 403 || r.status === 404) && r.fromSayso !== false) return none('closed');
+  if (r.ok === false && r.kind === 'http' && (r.status === 403 || r.status === 404) && r.fromAimiru !== false) return none('closed');
   return none();
 }
 
@@ -479,7 +475,7 @@ export function briefOf(r) {
 // ---------------------------------------------------------------------------
 
 /**
- * A project's label as Aimiru keeps it (the same as @sayso/core normaliseProjectLabel): accents
+ * A project's label as Aimiru keeps it (the same as normaliseProjectLabel in Aimiru's own code): accents
  * dropped, lower case, spaces as "-", only a to z, 0 to 9, ".", "_" and "-", no separator at
  * either end, at most 60. Null when nothing is left.
  */
@@ -502,7 +498,7 @@ export function projectLabelOf(raw) {
 /**
  * The project this agent works in (ADR-0056), for check and record: {label, hash}. The label is
  * what the person reads and names in rules ("Never deploy in project client-a"): AIMIRU_PROJECT
- * (or SAYSO_PROJECT) when the person set it, else the folder's name. The hash is sha256 of the folder's full path,
+ * when the person set it, else the folder's name. The hash is sha256 of the folder's full path,
  * worked out here: the path itself never leaves this computer, and Aimiru keeps the hash to itself.
  * Null without a folder or a label, and for the home folder or the disk's root.
  */
@@ -545,9 +541,10 @@ const REDACTIONS = [
   // Authorization headers and bearer/basic credentials
   [/\b(authorization\s*[:=]\s*["']?\s*)(bearer|basic|token|digest)\s+[^\s"',;]+/gi, `$1$2 ${R}`],
   [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, `$1 ${R}`],
-  // Aimiru's own keys, by the prefix keys have now and the one a later release may give them (devrel
-  // review of wk/connectors-flow: a copy installed now never updates, so it hides both).
-  [/\b(?:sayso|aimiru)_(?:agt|key)_[A-Za-z0-9_-]{6,}/g, R],
+  // Aimiru's own keys: a word, _agt_ or _key_, then the key, whatever word a release gives them
+  // (devrel review of wk/connectors-flow: a copy installed now never updates, so it hides every
+  // prefix a key has had or may have, ADR-0164).
+  [/\b[a-z][a-z0-9]{1,15}_(?:agt|key)_[A-Za-z0-9_-]{6,}/g, R],
   // Vendor key shapes
   [/\bsk-ant-[A-Za-z0-9_-]{10,}/g, R],
   [/\bsk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}/g, R],
@@ -1080,7 +1077,7 @@ function idempotencyKeyIn(body, headers) {
  * a 401 from Aimiru itself with the code demo_ended. A revoked or unknown key keeps invalid_token.
  */
 export function isDemoEnded(r) {
-  return Boolean(r) && r.ok === false && r.kind === 'http' && r.status === 401 && r.fromSayso !== false && r.code === 'demo_ended';
+  return Boolean(r) && r.ok === false && r.kind === 'http' && r.status === 401 && r.fromAimiru !== false && r.code === 'demo_ended';
 }
 
 /** The shortest retry worth starting after a dropped connection, in ms. */
@@ -1089,8 +1086,8 @@ const RETRY_MIN_MS = 250;
 /**
  * @param {object} opts
  * @param {string} opts.baseUrl      Aimiru base URL (CONTRACT.md "Base and auth")
- * @param {string} opts.token        agent key, sayso_agt_...
- * @param {string} opts.connector    "<name>/<version>", sent as x-sayso-connector
+ * @param {string} opts.token        agent key, aimiru_agt_...
+ * @param {string} opts.connector    "<name>/<version>", sent as x-aimiru-connector
  * @param {string} [opts.agentLabel] how the agent is named in person-facing sentences
  * @param {string} [opts.spoolDir]   where records are spooled when Aimiru cannot take them
  * @param {object} [opts.timeouts]   overrides for DEFAULT_TIMEOUTS
@@ -1100,7 +1097,7 @@ const RETRY_MIN_MS = 250;
  * @param {string} [opts.undoLine]   the line that removes this connector, said when a demo has ended
  *                                   (default: UNDO_LINES for this connector's name)
  */
-export function createSaysoClient(opts = {}) {
+export function createAimiruClient(opts = {}) {
   const timeouts = { ...DEFAULT_TIMEOUTS };
   for (const [k, v] of Object.entries(opts.timeouts || {})) {
     // A bad value (NaN, 0, negative, text) keeps the default instead of breaking every request.
@@ -1160,7 +1157,7 @@ export function createSaysoClient(opts = {}) {
           headers: {
             accept: 'application/json',
             authorization: `Bearer ${token}`,
-            'x-sayso-connector': connector,
+            'x-aimiru-connector': connector,
             'x-request-id': requestId,
             ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
             ...headers,
@@ -1189,8 +1186,8 @@ export function createSaysoClient(opts = {}) {
         data = null;
       }
     }
-    const serverRequestId = res.headers.get('x-sayso-request-id');
-    if (res.ok) return { ok: true, status: res.status, data, requestId, serverRequestId, replay: res.headers.get('x-sayso-replay') === 'true' };
+    const serverRequestId = res.headers.get('x-aimiru-request-id');
+    if (res.ok) return { ok: true, status: res.status, data, requestId, serverRequestId, replay: res.headers.get('x-aimiru-replay') === 'true' };
     const ra = res.headers.get('retry-after');
     let retryAfterMs = null;
     if (ra) {
@@ -1204,7 +1201,7 @@ export function createSaysoClient(opts = {}) {
       status: res.status,
       code,
       message: data?.error?.message ?? null,
-      fromSayso: isSaysoAnswer(data),
+      fromAimiru: isAimiruAnswer(data),
       data,
       retryAfterMs,
       requestId,
@@ -1337,7 +1334,7 @@ export function createSaysoClient(opts = {}) {
 
   /** A 423 paused answer from any route: this agent is paused until Aimiru says otherwise (ADR-0022). */
   function notePausedAnswer(r) {
-    if (!r.ok && r.kind === 'http' && r.status === 423 && r.fromSayso !== false) {
+    if (!r.ok && r.kind === 'http' && r.status === 423 && r.fromAimiru !== false) {
       pauseMemory.remember(r.data?.explain ?? null);
     }
     return r;
@@ -1424,7 +1421,7 @@ export function createSaysoClient(opts = {}) {
   function retryable(r) {
     if (r.ok) return false;
     if (r.kind !== 'http') return true; // network, timeout, not_configured
-    if (r.fromSayso === false) return true; // refused before it reached Aimiru: try again later
+    if (r.fromAimiru === false) return true; // refused before it reached Aimiru: try again later
     return r.status >= 500 || r.status === 429 || r.status === 401 || r.status === 423 || r.status === 408;
   }
 
@@ -1494,7 +1491,7 @@ export function createSaysoClient(opts = {}) {
    * check() with the contract's client rules applied.
    * Resolves to { decision: allow|ask|deny, reason, explain, exceptionId, actionId, pollAfterMs, expiresAt,
    *               failOpen?, failClosed?, status, requestId }.
-   * reason is one of: sayso, paused, invalid_token, demo_ended, outside_grant, conflict, rate_limited,
+   * reason is one of: aimiru, paused, invalid_token, demo_ended, outside_grant, conflict, rate_limited,
    *                   unreachable, bad_response, not_configured.
    */
   async function decide(action, opts = {}) {
@@ -1504,7 +1501,7 @@ export function createSaysoClient(opts = {}) {
       return d;
     }
     // Aimiru answered with a decision, which it never does while this agent is paused.
-    if (d.reason === 'sayso') {
+    if (d.reason === 'aimiru') {
       pauseMemory.forget();
       return d;
     }
@@ -1553,7 +1550,7 @@ export function createSaysoClient(opts = {}) {
     let r = await check(wire, { context, idempotencyKey, run, project, parts: named9, taskId: task, timeoutMs: checkTimeout() });
     // An Aimiru that refused the field as a bad request (one from before it drops it unread): the
     // same step is checked again without it, so a check never fails because of the job's id.
-    if (task && !r.ok && r.kind === 'http' && (r.status === 400 || r.status === 422) && r.fromSayso !== false && checkTimeout() >= 250) {
+    if (task && !r.ok && r.kind === 'http' && (r.status === 400 || r.status === 422) && r.fromAimiru !== false && checkTimeout() >= 250) {
       task = null;
       r = await check(wire, { context, idempotencyKey, run, project, parts: named9, timeoutMs: checkTimeout() });
     }
@@ -1577,7 +1574,7 @@ export function createSaysoClient(opts = {}) {
       }
       return {
         decision: d.decision,
-        reason: 'sayso',
+        reason: 'aimiru',
         explain: d.explain ?? (d.rule?.text ? d.rule.text : null),
         rule: d.rule ?? null,
         actionId: d.action_id ?? null,
@@ -1596,7 +1593,7 @@ export function createSaysoClient(opts = {}) {
         ...base,
       };
     }
-    if (r.kind === 'http' && r.fromSayso === false && r.status !== 429) {
+    if (r.kind === 'http' && r.fromAimiru === false && r.status !== 429) {
       // Refused on the way (not Aimiru's JSON answer): Aimiru did not decide, so the fail-closed rule applies.
       return failByClass(action, 'unreachable', MESSAGES.unreachable(cls), base);
     }
@@ -1636,24 +1633,24 @@ export function createSaysoClient(opts = {}) {
     if (r.ok) {
       const d = r.data || {};
       // A no in either field wins; a yes needs the status to say so (or no status at all).
-      if (d.status === 'denied' || d.decision === 'deny') return { status: 'denied', explain: d.explain ?? null, reason: 'sayso' };
-      if (d.status === 'expired') return { status: 'expired', explain: d.explain ?? null, reason: 'sayso' };
+      if (d.status === 'denied' || d.decision === 'deny') return { status: 'denied', explain: d.explain ?? null, reason: 'aimiru' };
+      if (d.status === 'expired') return { status: 'expired', explain: d.explain ?? null, reason: 'aimiru' };
       // When the person said yes (Aimiru's clock), so a yes given before a Pause is never used after
       // it (ADR-0035, ADR-0142); null from an Aimiru that does not say.
       if (d.status === 'allowed' || (d.status == null && d.decision === 'allow')) {
-        return { status: 'allowed', explain: d.explain ?? null, reason: 'sayso', answeredAt: typeof d.answered_at === 'string' ? d.answered_at : null };
+        return { status: 'allowed', explain: d.explain ?? null, reason: 'aimiru', answeredAt: typeof d.answered_at === 'string' ? d.answered_at : null };
       }
       return { status: 'waiting', explain: d.explain ?? null, reason: 'waiting' };
     }
-    const sayso = r.kind === 'http' && r.fromSayso !== false;
-    if (sayso && r.status === 423) {
+    const aimiru = r.kind === 'http' && r.fromAimiru !== false;
+    if (aimiru && r.status === 423) {
       pauseMemory.remember(r.data?.explain || null);
       return { status: 'denied', explain: r.data?.explain || MESSAGES.paused, reason: 'paused' };
     }
-    if (sayso && r.status === 401) {
+    if (aimiru && r.status === 401) {
       return isDemoEnded(r) ? { status: 'denied', explain: demoEndedText, reason: 'demo_ended' } : { status: 'denied', explain: MESSAGES.reconnect(agentLabel), reason: 'invalid_token' };
     }
-    if (sayso && (r.status === 404 || r.status === 403 || r.status === 410)) return { status: 'expired', explain: null, reason: 'gone' };
+    if (aimiru && (r.status === 404 || r.status === 403 || r.status === 410)) return { status: 'expired', explain: null, reason: 'gone' };
     return null;
   }
 

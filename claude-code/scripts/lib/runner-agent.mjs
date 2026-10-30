@@ -7,7 +7,7 @@
 // folder with its PreToolUse entry intact (onFailure block, pre-tool-use.mjs); the person's settings
 // turn it on; and no settings file Claude Code reads for that folder (managed, the person's, the
 // folder's own up to its git folder) turns it off, turns all checks off or changes how the check runs
-// (turnsSaysoOff); and the key is the one /aimiru:connect saved in the plugin's own data folder, so
+// (turnsAimiruOff); and the key is the one /aimiru:connect saved in the plugin's own data folder, so
 // the job record below is signed with the key the session's checks use.
 //
 // Nor from the environment (security review of wk/runner): Claude Code reads CLAUDE_CODE_SIMPLE as
@@ -39,9 +39,9 @@ import readline from 'node:readline';
 import { jobPrompt } from '../vendor/messages.mjs';
 import { redactContacts } from '../vendor/contacts.mjs';
 import { claudePluginInstall, createNotes, noteLine, printable } from '../vendor/runner.mjs';
-import { redactSecrets, sha256Hex, truncate } from '../vendor/sayso-client.mjs';
+import { redactSecrets, sha256Hex, truncate } from '../vendor/aimiru-client.mjs';
 import { settingsFiles } from './native-prompt.mjs';
-import { HIJACK_ENV_RE, MIN_ENFORCED_VERSION, claudeConfigDir, compareVersions, findDataDir, loadSettings, makeClient, stateStore, turnsSaysoOff } from './runtime.mjs';
+import { HIJACK_ENV_RE, MIN_ENFORCED_VERSION, claudeConfigDir, compareVersions, findDataDir, loadSettings, makeClient, stateStore, turnsAimiruOff } from './runtime.mjs';
 
 /** The shape the shared runner reads (vendor/runner.mjs RUNNER_AGENT_VERSION). */
 export const RUNNER_AGENT = 1;
@@ -234,7 +234,7 @@ function programFacts(bin, cache, env, now = Date.now()) {
 
 /** The Claude Code program: AIMIRU_CLAUDE_BIN (the runner sets it from `runner on`), else claude on PATH. */
 export function claudeBinOf(env = process.env) {
-  return env.AIMIRU_CLAUDE_BIN || env.SAYSO_CLAUDE_BIN || 'claude';
+  return env.AIMIRU_CLAUDE_BIN || 'claude';
 }
 
 /** The plugin's own settings, as its hooks read them, from the data folder Claude Code keeps for it. */
@@ -290,7 +290,7 @@ export function readyToRun({ env, dir, cache = new Map(), managed = null }) {
     } catch {
       return { ok: false, why: 'unreadable', file, text: CC_RUNNER_WORDS.unreadable(printable(file)) };
     }
-    if (turnsSaysoOff(json)) return { ok: false, why: 'turned_off', file, text: CC_RUNNER_WORDS.turnedOff(printable(file)) };
+    if (turnsAimiruOff(json)) return { ok: false, why: 'turned_off', file, text: CC_RUNNER_WORDS.turnedOff(printable(file)) };
   }
   // The key /aimiru:connect saved, in the data folder the plugin's hooks use.
   const settings = pluginSettings(env);

@@ -64,9 +64,9 @@ This reads only your own `AGENTS.md` (in `~/.codex`, or the folder `CODEX_HOME` 
 
 ## What it does to your computer
 
-- Saves your key in `~/.sayso/codex/key.json`, readable only by you.
-- Copies the check to `~/.sayso/codex/app`, so it keeps working after npx clears its downloads.
-- Adds two entries to Codex's `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`), after any of your own, and keeps a dated copy of the file it changed: the check, below, and **Aimiru's brief** at session start (`/bin/sh -c '/usr/bin/env -u NODE_OPTIONS -u NODE_PATH "<node>" "~/.sayso/codex/app/brief.mjs" 2>/dev/null; exit 0'`, 10 seconds). Installing again leaves each entry where it is, so your trust in it stays; one that changed is rewritten in the same place, and Codex asks you to trust it again. The entry runs `/bin/sh -c '{ /usr/bin/env -u NODE_OPTIONS -u NODE_PATH "<node>" "~/.sayso/codex/app/guard.mjs" ...; } ...'` with a one hour limit (a step held while you have paused waits up to 8 minutes for now, below Codex's own 10 minute limit for a check until we have seen Codex wait the hour; any other check answers within 45 seconds), for every tool call (no matcher). `<node>` is the Node.js that ran the install, by the link on your PATH when there is one (`/opt/homebrew/bin/node` rather than its versioned folder). The `/bin/sh` around it refuses the call whenever the guard ends any other way than a yes or a refusal: a Node.js that was upgraded away or removed, or the guard killed. Run the install line again after changing Node.js.
+- Saves your key in `~/.aimiru/codex/key.json`, readable only by you.
+- Copies the check to `~/.aimiru/codex/app`, so it keeps working after npx clears its downloads.
+- Adds two entries to Codex's `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`), after any of your own, and keeps a dated copy of the file it changed: the check, below, and **Aimiru's brief** at session start (`/bin/sh -c '/usr/bin/env -u NODE_OPTIONS -u NODE_PATH "<node>" "~/.aimiru/codex/app/brief.mjs" 2>/dev/null; exit 0'`, 10 seconds). Installing again leaves each entry where it is, so your trust in it stays; one that changed is rewritten in the same place, and Codex asks you to trust it again. The entry runs `/bin/sh -c '{ /usr/bin/env -u NODE_OPTIONS -u NODE_PATH "<node>" "~/.aimiru/codex/app/guard.mjs" ...; } ...'` with a one hour limit (a step held while you have paused waits up to 8 minutes for now, below Codex's own 10 minute limit for a check until we have seen Codex wait the hour; any other check answers within 45 seconds), for every tool call (no matcher). `<node>` is the Node.js that ran the install, by the link on your PATH when there is one (`/opt/homebrew/bin/node` rather than its versioned folder). The `/bin/sh` around it refuses the call whenever the guard ends any other way than a yes or a refusal: a Node.js that was upgraded away or removed, or the guard killed. Run the install line again after changing Node.js.
 
 ## Reads decided on this computer
 
@@ -74,7 +74,7 @@ When your rules allow reading and changing files inside your project without con
 
 ## How steps are read
 
-Codex's commands, file changes and tool server calls are read the same way as Aimiru for Claude Code reads Claude Code's, with the same reading of each command. A plain web read (`curl URL`, any GET or HEAD that sends nothing) is reading, with the site named, recorded and not asked about. A request that sends data off this computer (`curl -d`, any POST, a long run of data in a header or the address, `scp`, `nc`, `ssh` given input) is sharing, with the full host named, so Aimiru asks the first time data goes to a new place, and it does not run while Aimiru cannot be reached. A change to Codex's, Claude Code's or Aimiru's own settings and files (`config.toml`, `hooks.json` and rules in `~/.codex` or `CODEX_HOME`, anything in the project's `.codex` folder, `~/.claude`, `~/.sayso`), and `aimiru-codex init` or `uninstall` run by Codex, is treated as removing a guard: Aimiru asks you, and it does not run while Aimiru cannot be reached.
+Codex's commands, file changes and tool server calls are read the same way as Aimiru for Claude Code reads Claude Code's, with the same reading of each command. A plain web read (`curl URL`, any GET or HEAD that sends nothing) is reading, with the site named, recorded and not asked about. A request that sends data off this computer (`curl -d`, any POST, a long run of data in a header or the address, `scp`, `nc`, `ssh` given input) is sharing, with the full host named, so Aimiru asks the first time data goes to a new place, and it does not run while Aimiru cannot be reached. A change to Codex's, Claude Code's or Aimiru's own settings and files (`config.toml`, `hooks.json` and rules in `~/.codex` or `CODEX_HOME`, anything in the project's `.codex` folder, `~/.claude`, `~/.aimiru`), and `aimiru-codex init` or `uninstall` run by Codex, is treated as removing a guard: Aimiru asks you, and it does not run while Aimiru cannot be reached.
 
 ## Programs Codex writes
 
@@ -111,7 +111,7 @@ OpenAI calls Codex's checks "a useful guardrail, not a complete enforcement boun
 - When you pause: that this computer learned of the Pause and how (while working, or at a step), and how many steps went ahead after your tap.
 - During `take`: the job's id with each check, a short line now and then (a command, a file's name, Codex's own words, never a command's output), and at the end Codex's last message as the result.
 - With `remember`: the one line, and its topic.
-- With `import`, after your choice: the lines you chose, each with its topic and that it came from Codex's own instructions. Never the files. `~/.sayso/codex/import.json` keeps a fingerprint of each line sent (sha256 of the words), so a later import sends only what is new.
+- With `import`, after your choice: the lines you chose, each with its topic and that it came from Codex's own instructions. Never the files. `~/.aimiru/codex/import.json` keeps a fingerprint of each line sent (sha256 of the words), so a later import sends only what is new.
 
 Your key never leaves except to Aimiru, and nothing printed contains it.
 

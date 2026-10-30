@@ -10,7 +10,7 @@ import { Buffer } from 'node:buffer';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { evidenceText, redactSecrets, shellEvidenceInput, truncate } from './sayso-client.mjs';
+import { evidenceText, redactSecrets, shellEvidenceInput, truncate } from './aimiru-client.mjs';
 import { cartFacts, cleanId, linkSpendRequest, pageCheckoutIn, ucpOperation, ucpProtocol } from './checkout.mjs';
 
 /** Strongest first. When a command does several things, the strongest class wins. */
@@ -219,12 +219,14 @@ export function isInsideWorkArea(p, ctx) {
  * and .claude.json, Codex's settings and checks in any .codex folder (the home folder's, CODEX_HOME's
  * and a project's, which Codex loads in a trusted project: config.toml, a profile's
  * <name>.config.toml, hooks.json, requirements.toml and the rules folder) and the project's whole
- * .codex folder, Aimiru's own folder (~/.sayso, which holds the runner's folder too: its copy of
+ * .codex folder, Aimiru's own folder (~/.aimiru, which holds the runner's folder too: its copy of
  * Aimiru, settings, id and process number) and its data folders under any Claude Code settings folder
  * (plugins/data/aimiru-...), the runner's LaunchAgent (~/Library/LaunchAgents/app.aimiru.runner.plist,
- * which launchd starts at every login: security review of wk/runner), and what the connector adds in
- * ctx.protectedPaths (its data folder and plugin root, CODEX_HOME, the same files under
- * CLAUDE_CONFIG_DIR: makerProtectedPaths). Changing them can turn Aimiru off, for this agent or for
+ * which launchd starts at every login: security review of wk/runner), a check copy or runner copy in
+ * any dot folder of the home folder by its shape (<home>/.<word>/codex and /runner, where an earlier
+ * install still runs from: ADR-0164), and what the connector adds in ctx.protectedPaths (its data
+ * folder and plugin root, CODEX_HOME, the same files under CLAUDE_CONFIG_DIR, and the folders the
+ * checks and the runner are started from now: makerProtectedPaths). Changing them can turn Aimiru off, for this agent or for
  * another one on the same computer, so every connector protects every maker's files by name (review
  * of wk/connectors-flow, 28 Oct).
  */
@@ -238,10 +240,83 @@ export function isProtectedPath(p, ctx) {
   if (/\/\.codex\/([^/]+\.)?config\.toml$/.test(norm) || /\/\.codex\/(hooks\.json|requirements\.toml)$/.test(norm)) return true;
   if (/\/\.codex\/rules(\/|$)/.test(norm)) return true;
   if (ctx?.project && isWithin(p, path.join(ctx.project, '.codex'))) return true;
-  if (/\/plugins\/data\/(aimiru|sayso)-[^/]*(\/|$)/.test(norm)) return true;
-  if (/\/\.sayso\//.test(norm) || /\/\.sayso$/.test(norm)) return true;
+  if (/\/plugins\/data\/aimiru-[^/]*(\/|$)/.test(norm)) return true;
+  if (/\/\.aimiru\//.test(norm) || /\/\.aimiru$/.test(norm)) return true;
   if (RUNNER_PLIST_RE.test(norm)) return true;
+  if (isCopyFolderShape(norm, ctx)) return true;
   return (ctx?.protectedPaths || []).some((pp) => pp && isWithin(p, path.resolve(pp)));
+}
+
+/**
+ * Aimiru's copies by their shape: <home>/.<word>/codex (Codex's check copy and its key) and
+ * <home>/.<word>/runner (the copy launchd starts at every login with the agents' keys). An install
+ * made before Aimiru's files moved to ~/.aimiru (ADR-0164) keeps running from its own dot folder
+ * until its install line runs again, and an agent beside it may not change that copy without an
+ * ask either; the shape guards it without naming the folder (security review of the rename).
+ */
+const COPY_FOLDER_SHAPE = /^\.[a-z]{3,12}\/(codex|runner)(\/|$)/;
+
+function homesOf(ctx) {
+  const given = Array.isArray(ctx?.homes) && ctx.homes.length ? ctx.homes : [ctx?.home || os.homedir()];
+  return given.filter(Boolean).map((h) => String(h).replace(/\\/g, '/').replace(/\/+$/, ''));
+}
+
+function isCopyFolderShape(norm, ctx) {
+  return homesOf(ctx).some((home) => norm.startsWith(`${home}/`) && COPY_FOLDER_SHAPE.test(norm.slice(home.length + 1)));
+}
+
+/**
+ * True when free text names a copy folder of that shape from the home folder: after ~, $HOME or the
+ * folder itself, or at the start of a quoted part added to it (homedir() + '/.<word>/codex').
+ */
+function mentionsCopyFolder(t, ctx) {
+  const homes = ['~', '$HOME', '${HOME}', ...homesOf(ctx)].map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`(${homes.join('|')}|['"\`])/\\.[a-z]{3,12}/(codex|runner)([/'"\`\\s]|$)`).test(t);
+}
+
+/** The values of a property list's <string> elements, with XML's five escapes read back. */
+function plistStrings(text) {
+  const unescape = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+  return [...String(text).matchAll(/<string>([^<]*)<\/string>/g)].map((m) => unescape(m[1]));
+}
+
+/**
+ * The folders Aimiru's checks run from on this computer now, read from where they are started: the
+ * <dot folder>/codex of each check copy Codex's hooks.json runs in the installer's own command shape
+ * (codex lib/install.mjs isEarlierCopy), and the runner's folder its LaunchAgent starts the copy
+ * from. An install of 0.3.0-rc.2 or older still runs from its own folder until its install line runs
+ * again (ADR-0164), so whichever folder is live is protected, by where it is and not by its name.
+ * Unreadable files add nothing.
+ * @param {Record<string, string|undefined>} [env]
+ */
+export function liveCopyFolders(env = process.env) {
+  const home = env.HOME || env.USERPROFILE || os.homedir();
+  const out = new Set();
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(path.resolve(env.CODEX_HOME || path.join(home, '.codex')), 'hooks.json'), 'utf8'));
+    for (const groups of Object.values(data?.hooks && typeof data.hooks === 'object' ? data.hooks : {})) {
+      for (const g of Array.isArray(groups) ? groups : []) {
+        for (const h of Array.isArray(g?.hooks) ? g.hooks : []) {
+          for (const m of String(h?.command ?? '').matchAll(/-u NODE_OPTIONS -u NODE_PATH "[^"]+" "([^"]+)"/g)) {
+            const parts = m[1].split('/');
+            const n = parts.length;
+            if (n >= 5 && parts[n - 2] === 'app' && parts[n - 3] === 'codex' && /^\.[A-Za-z0-9_-]+$/.test(parts[n - 4])) out.add(parts.slice(0, n - 2).join('/'));
+          }
+        }
+      }
+    }
+  } catch {
+    // no hooks.json, or one Aimiru cannot read: nothing to add
+  }
+  try {
+    for (const s of plistStrings(fs.readFileSync(path.join(home, 'Library', 'LaunchAgents', RUNNER_PLIST), 'utf8'))) {
+      const m = /^(\/.+)\/app\/runner\.mjs$/.exec(s);
+      if (m) out.add(m[1]);
+    }
+  } catch {
+    // no runner here
+  }
+  return [...out];
 }
 
 /** The runner's LaunchAgent (shared/runner.mjs launchAgentFile), by name. */
@@ -284,6 +359,8 @@ export function makerProtectedPaths(env = process.env) {
   const out = claudeConfigDirPaths(env.CLAUDE_CONFIG_DIR);
   if (env.CLAUDE_PLUGIN_DATA) out.push(path.resolve(env.CLAUDE_PLUGIN_DATA));
   out.push(path.resolve(env.CODEX_HOME || path.join(home, '.codex')));
+  // The folders the checks and the runner run from now, wherever an earlier install left them.
+  out.push(...liveCopyFolders(env));
   return out;
 }
 
@@ -293,7 +370,7 @@ const MANAGED_SETTINGS_DIRS = Object.freeze(['/Library/Application Support/Claud
 /** The protected files and folders a folder may hold, by where they are on this computer. */
 function protectedLocations(ctx) {
   const home = ctx?.home || os.homedir();
-  const at = [path.join(home, '.claude', 'settings.json'), path.join(home, '.claude', 'settings.local.json'), path.join(home, '.claude', 'plugins'), path.join(home, '.claude.json'), path.join(home, '.sayso'), path.join(home, 'Library', 'LaunchAgents', RUNNER_PLIST)];
+  const at = [path.join(home, '.claude', 'settings.json'), path.join(home, '.claude', 'settings.local.json'), path.join(home, '.claude', 'plugins'), path.join(home, '.claude.json'), path.join(home, '.aimiru'), path.join(home, 'Library', 'LaunchAgents', RUNNER_PLIST)];
   // Codex's settings and checks in the home folder, and the project's whole .codex folder.
   for (const name of ['config.toml', 'hooks.json', 'requirements.toml', 'rules']) at.push(path.join(home, '.codex', name));
   if (ctx?.project) at.push(path.join(ctx.project, '.claude', 'settings.json'), path.join(ctx.project, '.claude', 'settings.local.json'), path.join(ctx.project, '.codex'));
@@ -385,10 +462,12 @@ function isFolder(p) {
 /** True when free text (inline program code) names one of the protected files or folders. */
 export function mentionsProtectedPath(text, ctx) {
   const t = String(text ?? '').replace(/\\\\?/g, '/');
-  if (/\.claude\/settings(\.local)?\.json|managed-settings|\.claude\/plugins|\.claude\.json|(^|[\s'"`/])\.sayso([/'"`\s]|$)|app\.aimiru\.runner\.plist/.test(t)) return true;
+  if (/\.claude\/settings(\.local)?\.json|managed-settings|\.claude\/plugins|\.claude\.json|(^|[\s'"`/])\.aimiru([/'"`\s]|$)|app\.aimiru\.runner\.plist/.test(t)) return true;
   // Codex's settings and checks in any .codex folder, a .codex folder named from where the code
   // runs (the project's), and Aimiru's data under any Claude Code settings folder (isProtectedPath).
-  if (/\.codex\/(([^/'"`\s]+\.)?config\.toml|hooks\.json|requirements\.toml|rules)|(^|[\s'"`])\.codex\/|plugins\/data\/(aimiru|sayso)-/.test(t)) return true;
+  if (/\.codex\/(([^/'"`\s]+\.)?config\.toml|hooks\.json|requirements\.toml|rules)|(^|[\s'"`])\.codex\/|plugins\/data\/aimiru-/.test(t)) return true;
+  // A check copy or the runner's copy in any dot folder of the home folder (isProtectedPath).
+  if (mentionsCopyFolder(t, ctx)) return true;
   if (ctx?.project && t.includes(path.join(ctx.project, '.codex').replace(/\\/g, '/'))) return true;
   return (ctx?.protectedPaths || []).some((pp) => pp && t.includes(String(pp).replace(/\\/g, '/')));
 }
@@ -1200,7 +1279,7 @@ function protectedChange(out, why) {
 }
 
 /** Aimiru's setup programs for Codex, by every name they were published or run under. */
-const AIMIRU_SETUP_PROGRAMS = new Set(['aimiru-codex', 'sayso-codex', 'aimiru-codex.mjs', 'sayso-codex.mjs']);
+const AIMIRU_SETUP_PROGRAMS = new Set(['aimiru-codex', 'aimiru-codex.mjs']);
 
 /**
  * True when a run of Aimiru's Codex setup program rewrites Codex's check (review of
@@ -3509,7 +3588,7 @@ function isBenignVariable(name) {
 }
 
 /** Names programs are known to read: documentation of why the allowlist exists (and a list Aimiru for Hermes shares). */
-const PROGRAMS_READ_THESE = /^(LD_\w+|DYLD_\w+|GCONV_PATH|NODE_\w+|PYTHON\w+|PERL\w*|RUBY\w+|GEM_\w+|BUNDLE_\w+|JAVA\w*|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|MAVEN_OPTS|GRADLE_OPTS|DOTNET_\w+|CARGO_\w+|RUSTC\w*|RUSTDOC\w*|GO\w+|CC|CXX|CPP|LD|AR|BASH_ENV|ENV|ZDOTDIR|PROMPT_COMMAND|IFS|CDPATH|SHELL|SHELLOPTS|BASHOPTS|MAKE\w*|MFLAGS|BUN_\w+|DENO_\w+|NPM_CONFIG_\w+|npm_config_\w+|YARN_\w+|PNPM_\w+|SSH_ASKPASS|SUDO_ASKPASS|HOME|XDG_\w+|TMPDIR|SAYSO_\w+|AIMIRU_\w+|CLAUDE_\w+)$/;
+const PROGRAMS_READ_THESE = /^(LD_\w+|DYLD_\w+|GCONV_PATH|NODE_\w+|PYTHON\w+|PERL\w*|RUBY\w+|GEM_\w+|BUNDLE_\w+|JAVA\w*|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|MAVEN_OPTS|GRADLE_OPTS|DOTNET_\w+|CARGO_\w+|RUSTC\w*|RUSTDOC\w*|GO\w+|CC|CXX|CPP|LD|AR|BASH_ENV|ENV|ZDOTDIR|PROMPT_COMMAND|IFS|CDPATH|SHELL|SHELLOPTS|BASHOPTS|MAKE\w*|MFLAGS|BUN_\w+|DENO_\w+|NPM_CONFIG_\w+|npm_config_\w+|YARN_\w+|PNPM_\w+|SSH_ASKPASS|SUDO_ASKPASS|HOME|XDG_\w+|TMPDIR|AIMIRU_\w+|CLAUDE_\w+)$/;
 
 /** Variables whose value is a command another program runs; for pagers and editors it is all they do. */
 const PAGER_EDITOR_VARS = new Set(['PAGER', 'GIT_PAGER', 'MANPAGER', 'SYSTEMD_PAGER', 'BAT_PAGER', 'DELTA_PAGER', 'EDITOR', 'VISUAL', 'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR']);
@@ -6579,7 +6658,7 @@ function classifyInto(command, ctx, out, depth = 0) {
 
 /**
  * The lists that decide what is local work and which settings are harmless, for connectors written
- * in other languages (Aimiru for Hermes keeps a copy in sayso/local-work.json; a test compares).
+ * in other languages (Aimiru for Hermes keeps a copy in aimiru_hermes/local-work.json; a test compares).
  */
 export function localWorkTables() {
   const sorted = (xs) => [...xs].sort();
@@ -7136,58 +7215,52 @@ export function splitMcpToolName(toolName) {
 }
 
 /** The tools Aimiru's own server offers (CONTRACT.md, "MCP"); get_answer is the eighth (ADR-0035), get_task the ninth (ADR-0060), propose the tenth (ADR-0057), and jobs with steps and Memory add six (ADR-0124, ADR-0125): sixteen. */
-export const SAYSO_MCP_TOOLS = Object.freeze(['get_context', 'check', 'get_answer', 'request_approval', 'record', 'report_cant', 'take_task', 'pause_status', 'get_task', 'propose', 'start_job', 'add_step', 'get_job', 'complete_step', 'memory_read', 'memory_propose']);
+export const AIMIRU_MCP_TOOLS = Object.freeze(['get_context', 'check', 'get_answer', 'request_approval', 'record', 'report_cant', 'take_task', 'pause_status', 'get_task', 'propose', 'start_job', 'add_step', 'get_job', 'complete_step', 'memory_read', 'memory_propose']);
 
 /**
  * The name Aimiru for Claude Code is installed under (claude-code/.claude-plugin/plugin.json). The
- * published name is final (ADR-0089: a tester never reinstalls for a rename), and it is the
- * product's name since the rename (ADR-0093).
+ * published name is final (ADR-0089: a tester never reinstalls for a rename).
  */
-export const SAYSO_PLUGIN_NAME = 'aimiru';
+export const AIMIRU_PLUGIN_NAME = 'aimiru';
 
 /**
- * The plugin's published name and the name this repository used before it (installs made from a
- * copy of this folder before 23 Oct 2026). Used only where reading both names fails safe: finding
- * the data folder, and the settings guard that refuses turning either one off. Trust is not one
- * of them: isSaysoTool trusts the published name alone (ADR-0089 planned the rename pass to drop
- * the old name there, since any plugin called `sayso` serving these tool names would skip the
- * check). An install still under `sayso` has its own tools checked with Aimiru, which costs a
- * request, not safety, and ADR-0089 already asks those installs to reinstall once.
+ * Every name the plugin is installed under: its published name only (ADR-0164). Used where the
+ * plugin is found by name: its data folder, its settings, and the settings guard that refuses
+ * turning it off. Trust is not one of them: isAimiruTool reads more than the name.
  */
-export const SAYSO_PLUGIN_NAMES = Object.freeze([SAYSO_PLUGIN_NAME, 'sayso']);
+export const AIMIRU_PLUGIN_NAMES = Object.freeze([AIMIRU_PLUGIN_NAME]);
 
 /**
- * True only for Aimiru's own tools (SAYSO_MCP_TOOLS) served by a server bundled in the Aimiru plugin itself.
+ * True only for Aimiru's own tools (AIMIRU_MCP_TOOLS) served by a server bundled in the Aimiru plugin itself.
  * Those are not checked with Aimiru (it would ask Aimiru about asking Aimiru).
  *
- * Names are never trusted: anyone can call a server "sayso", and a tool name with "__" in it is
+ * Names are never trusted: anyone can call a server "aimiru", and a tool name with "__" in it is
  * just a name. Trust comes from what Claude Code reports about the server (hook input
  * `mcp_server`, Claude Code 2.1.274 or later): its `source` must be "plugin", and its name must
  * be a server of the plugin named "aimiru": "plugin:aimiru:<server>", or "<server>" with the tool
- * named mcp__plugin_aimiru_<server>__.... The plugin's name before the rename, "sayso", is not
- * trusted (ADR-0089, ADR-0093). Without that, or for anything
+ * named mcp__plugin_aimiru_<server>__.... Without that, or for anything
  * else (tools forwarded through aimiru-mcp-proxy included), the call is checked; checking twice
  * costs a request, not safety.
  * @param {string} toolName  Claude Code's tool name, mcp__<server>__<tool>
  * @param {{name?: string, source?: string}|null} [mcpServer]  the hook input's mcp_server
  */
-export function isSaysoTool(toolName, mcpServer = null) {
+export function isAimiruTool(toolName, mcpServer = null) {
   const parts = splitMcpToolName(toolName);
-  if (!parts || !SAYSO_MCP_TOOLS.includes(parts.tool)) return false;
+  if (!parts || !AIMIRU_MCP_TOOLS.includes(parts.tool)) return false;
   if (!mcpServer || typeof mcpServer !== 'object' || mcpServer.source !== 'plugin') return false;
   const name = typeof mcpServer.name === 'string' ? mcpServer.name : '';
   const scoped = /^plugin:([^:]+):(.+)$/.exec(name);
-  if (scoped && scoped[1] !== SAYSO_PLUGIN_NAME) return false;
+  if (scoped && scoped[1] !== AIMIRU_PLUGIN_NAME) return false;
   const serverKey = scoped ? scoped[2] : name;
   if (!serverKey || serverKey.includes(':')) return false;
   // Claude Code names a plugin's server in tool names as plugin_<plugin>_<server>, and the plugin
   // must be Aimiru's under its published name, whether the server's name is scoped or bare.
   const key = serverKey.replace(/[^A-Za-z0-9_-]/g, '_');
-  return parts.server === `plugin_${SAYSO_PLUGIN_NAME}_${key}`;
+  return parts.server === `plugin_${AIMIRU_PLUGIN_NAME}_${key}`;
 }
 
-/** How Claude names a tool of Aimiru's own server in this plugin: mcp__plugin_aimiru_sayso__<tool>. */
-export function saysoToolName(tool, plugin = SAYSO_PLUGIN_NAME, server = 'sayso') {
+/** How Claude names a tool of Aimiru's own server in this plugin: mcp__plugin_aimiru_aimiru__<tool>. */
+export function aimiruToolName(tool, plugin = AIMIRU_PLUGIN_NAME, server = 'aimiru') {
   return `mcp__plugin_${plugin}_${server}__${tool}`;
 }
 

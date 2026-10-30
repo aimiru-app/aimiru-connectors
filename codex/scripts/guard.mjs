@@ -39,7 +39,7 @@ import { STOPPED_REASON } from './lib/words.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CHECK = path.join(here, 'pre-tool-use.mjs');
 /** The check's 40 s plus room to start and answer. */
-const LIMIT_MS = Math.min(45_000, [process.env.AIMIRU_GUARD_LIMIT_MS, process.env.SAYSO_GUARD_LIMIT_MS].map(Number).find((n) => n > 0) ?? 45_000);
+const LIMIT_MS = Math.min(45_000, [process.env.AIMIRU_GUARD_LIMIT_MS].map(Number).find((n) => n > 0) ?? 45_000);
 /**
  * The longest the guard answers after its own start, whatever the check asks (ADR-0142; quality and
  * engineering review of wk/connectors-flow, 28 Oct): a step held while paused (CODEX_HOLD_CEILING_MS,
@@ -50,7 +50,7 @@ const LIMIT_MS = Math.min(45_000, [process.env.AIMIRU_GUARD_LIMIT_MS, process.en
  */
 const HOLD_LIMIT_MS = 585_000;
 /** AIMIRU_GUARD_HOLD_LIMIT_MS can only make it shorter (tests). */
-const holdLimitMs = Math.min(HOLD_LIMIT_MS, [process.env.AIMIRU_GUARD_HOLD_LIMIT_MS, process.env.SAYSO_GUARD_HOLD_LIMIT_MS].map(Number).find((n) => n > 0) ?? HOLD_LIMIT_MS);
+const holdLimitMs = Math.min(HOLD_LIMIT_MS, [process.env.AIMIRU_GUARD_HOLD_LIMIT_MS].map(Number).find((n) => n > 0) ?? HOLD_LIMIT_MS);
 /** Every timer ends by this moment, so several "limit" lines never add up past the limit. */
 const guardEnd = Date.now() + holdLimitMs;
 
@@ -77,7 +77,7 @@ function answerForCheck() {
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, answerForCheck);
 
 // NODE_NO_WARNINGS: a warning Node prints on stderr would become part of a refusal's reason.
-const childEnv = { ...process.env, SAYSO_CODEX_GUARD: '1', SAYSO_FALLBACK_FD: '3', NODE_NO_WARNINGS: '1' };
+const childEnv = { ...process.env, AIMIRU_CODEX_GUARD: '1', AIMIRU_FALLBACK_FD: '3', NODE_NO_WARNINGS: '1' };
 delete childEnv.NODE_OPTIONS;
 delete childEnv.NODE_PATH;
 

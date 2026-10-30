@@ -11,8 +11,8 @@
 // import: what Codex's own AGENTS.md files say about the person, shown, then sent as the person
 // chooses (lib/import.mjs, ADR-0162); init asks about it once.
 //
-// init: gets a key (AIMIRU_AGENT_TOKEN or SAYSO_AGENT_TOKEN, a hidden prompt with --paste-key, or pairing by code), saves
-// it owner-only in ~/.sayso/codex, copies the check to ~/.sayso/codex/app, adds it to Codex's
+// init: gets a key (AIMIRU_AGENT_TOKEN, a hidden prompt with --paste-key, or pairing by code), saves
+// it owner-only in ~/.aimiru/codex, copies the check to ~/.aimiru/codex/app, adds it to Codex's
 // hooks.json, and tells Aimiru it is installed and waits for the person's trust in Codex (Advised).
 // The tier changes to Enforced (shown as Guardrail, ADR-0148) only when the check itself first runs inside Codex.
 // Never prints the key.
@@ -35,13 +35,14 @@ import {
   dropPendingPairing,
   pairAgent,
   pendingLasts,
+  readKeyFile,
   readPendingPairing,
   resumeFrom,
   waitForPractice,
   writeKeyFile,
   writePendingPairing,
 } from './vendor/pair.mjs';
-import { installSource, normaliseBaseUrl, setting } from './vendor/sayso-client.mjs';
+import { installSource, normaliseBaseUrl, setting } from './vendor/aimiru-client.mjs';
 import { MESSAGES } from './vendor/messages.mjs';
 import { pauseHoldOn } from './vendor/pause-watch.mjs';
 import {
@@ -61,14 +62,16 @@ import {
   ranSinceInstall,
   stateStore,
 } from './lib/runtime.mjs';
-import { appDirOf, codexSettingsFacts, commandPaths, copyApp, entryTrust, findOurBrief, findOurHook, hookKeyOf, installHook, isOurExactBrief, isOurExactCheck, stableNodePath, uninstallHook } from './lib/install.mjs';
+import { appDirOf, codexSettingsFacts, commandPaths, copyApp, earlierDataDir, entryTrust, findOurBrief, findOurHook, hookKeyOf, installHook, isOurExactBrief, isOurExactCheck, removeEarlierCopy, stableNodePath, uninstallHook } from './lib/install.mjs';
+import { earlierInstalls } from './vendor/runner.mjs';
 import { remember, REMEMBER_TOPICS } from './lib/remember.mjs';
 import { importLines, offerImport } from './lib/import.mjs';
 import { take } from './lib/take.mjs';
 import { JOB_WORDS, WORDS } from './lib/words.mjs';
 import { codexRunner } from './runner.mjs';
 
-const KEY_RE = /^sayso_agt_[A-Za-z0-9_-]{43}$/;
+/** An Aimiru agent key, as shared/pair.mjs readKeyFile reads one (ADR-0164). */
+const KEY_RE = /^[a-z]{3,12}_agt_[A-Za-z0-9_-]{43}$/;
 /**
  * The tier as people read it. Codex held by its own check shows as Guardrail (ADR-0148): a word on
  * screens only, over the tier Aimiru stores and sends, which stays enforced; never stronger than it.
@@ -88,7 +91,7 @@ const HELP = `${PACKAGE_NAME} ${VERSION}: Aimiru's check for Codex
 Usage:
   ${PACKAGE_NAME} init [options]       add Aimiru's check to Codex and connect it to Aimiru
       --aimiru-url <address>           your Aimiru address, from Aimiru under Agents, Codex
-                                       (${DEFAULT_ADDRESS} when left out; --sayso-url works too)
+                                       (${DEFAULT_ADDRESS} when left out)
       --paste-key                      paste a key instead of picking a code in your browser
       --email <your Aimiru email>      the request to connect also reaches your phone
       --wait <seconds>                 how long to wait for you to connect it (at most 10 minutes)
@@ -190,6 +193,23 @@ export function addressOf({ given = null, pending = null, settings = {}, now = D
   return settings.baseUrl || DEFAULT_ADDRESS;
 }
 
+/** True when two Aimiru addresses are the same once normalised; false when either is not one. */
+function sameAddress(a, b) {
+  try {
+    return normaliseBaseUrl(a) === normaliseBaseUrl(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The other connectors on this computer still on an earlier Aimiru (ADR-0164), each with the line
+ * that updates it. Codex's own entry is the doctor's other findings.
+ */
+function earlierOthers(env) {
+  return earlierInstalls(env, { runnerLine: `npx ${PACKAGE_NAME} runner on` }).filter((e) => e.connector !== 'codex');
+}
+
 /** Resolves 'stopped' once `stop` fires; never, when there is no stop. */
 function stopped(stop) {
   if (!stop) return new Promise(() => {});
@@ -199,7 +219,7 @@ function stopped(stop) {
 
 /**
  * @param {object} o
- * @param {string} [o.saysoUrl] @param {boolean} [o.pasteKey] @param {string} [o.email]
+ * @param {string} [o.aimiruUrl] @param {boolean} [o.pasteKey] @param {string} [o.email]
  * @param {number} [o.waitS] how long this run waits for the person to connect it (default: as long as the request lasts)
  * @param {object} [o.env] @param {(s: string) => void} [o.print]
  * @param {string} [o.nodePath] the Node.js Codex runs the check with (default: this one)
@@ -226,15 +246,27 @@ export async function init(o = {}) {
 
   let url;
   try {
-    url = normaliseBaseUrl(addressOf({ given: o.saysoUrl, pending, settings }));
+    url = normaliseBaseUrl(addressOf({ given: o.aimiruUrl, pending, settings }));
   } catch (e) {
     print(WORDS.badAddress(e.message));
     return 1;
   }
 
-  // The key: the environment, the key saved before for this address, a hidden prompt, or pairing.
+  // The key: the environment, the key saved before for this address, the key an earlier install
+  // saved for it (ADR-0164: the same agent keeps its rules and standing; not when the person came to
+  // paste a key, which Connect has just made), a hidden prompt, or pairing.
   let key = (setting(env, 'AGENT_TOKEN') || '').trim();
   if (!key && settings.keySource === 'file' && settings.baseUrl === url) key = settings.token;
+  const earlier = earlierDataDir({ codexHome, appDir: appDirOf(dataDir) });
+  let carried = null;
+  if (!key && earlier && o.pasteKey !== true) {
+    const saved = readKeyFile(keyFilePath(earlier));
+    if (saved && sameAddress(saved.baseUrl, url)) {
+      key = saved.key;
+      carried = saved;
+      print(WORDS.carriedKey);
+    }
+  }
   let paired = null;
   let failed = false;
   if (!key && o.pasteKey !== true) {
@@ -279,7 +311,7 @@ export async function init(o = {}) {
   }
   // Saved even when it came from the environment: Codex may start the check without that variable.
   if (key) {
-    writeKeyFile(keyFilePath(dataDir), { agentKey: key, baseUrl: url, agentId: paired?.agentId ?? null, name: paired?.name ?? AGENT_LABEL });
+    writeKeyFile(keyFilePath(dataDir), { agentKey: key, baseUrl: url, agentId: paired?.agentId ?? carried?.agentId ?? null, name: paired?.name ?? carried?.name ?? AGENT_LABEL });
     print(WORDS.savedKey(keyFilePath(dataDir)));
   }
 
@@ -295,6 +327,16 @@ export async function init(o = {}) {
   }
   print(hook.replaced ? WORDS.replaced(hook.file) : WORDS.installed(hook.file));
   if (hook.backup) print(WORDS.backedUp(hook.backup));
+  // The earlier install's copy and key, once Codex's entries run this copy and its key is saved here
+  // (security review of the rename): nothing is left that no check of this release reads. A key
+  // that was not carried belongs to another Codex in Aimiru, which the person removes there.
+  if (earlier && key && !earlierDataDir({ codexHome, appDir })) {
+    const hadKey = Boolean(readKeyFile(keyFilePath(earlier)));
+    removeEarlierCopy(earlier);
+    print(WORDS.earlierRemoved(earlier));
+    if (hadKey && !carried) print(WORDS.removeEarlierAgent);
+  }
+  for (const e of earlierOthers(env)) print(e.text);
   const facts = codexSettingsFacts({ codexHome, hookKey: hookKeyOf(hook.file, hook.groupIndex) });
   if (facts.checksOff) print(WORDS.checksOff);
 
@@ -361,7 +403,7 @@ export async function doctor(o = {}) {
   if (settings.token && settings.baseUrl) {
     const me = await makeClient(settings, { spool: false }).me();
     // A demo's key after its hour (wave 10, snag 12): say so, with the line that removes the check.
-    const ended = !me.ok && me.status === 401 && me.fromSayso !== false && me.code === 'demo_ended';
+    const ended = !me.ok && me.status === 401 && me.fromAimiru !== false && me.code === 'demo_ended';
     add('reach', me.ok, ended ? WORDS.demoEnded(UNDO_LINE) : WORDS.doctorReach(me.ok));
   }
   // Only a run inside Codex since the last init proves the person trusted the check (wave 10, T5,
@@ -411,6 +453,9 @@ export async function doctor(o = {}) {
   else add('brief', false, JOB_WORDS.briefUntrusted('/hooks'));
   // How an ask holds a step (ADR-0145), as Claude Code's doctor says it.
   add('ask_hold', true, MESSAGES.waitHold);
+  // Another connector here still on an earlier Aimiru (ADR-0164): until it is updated, its files
+  // and Codex's are not guarded from each other.
+  for (const e of earlierOthers(env)) add(`earlier_${e.connector.replace(/-/g, '_')}`, false, e.text);
   if (o.json) print(JSON.stringify({ connector: CONNECTOR, version: VERSION, checks: checks.map(({ check, ok }) => ({ check, ok })), tier: status.tier ?? null }, null, 2));
   else for (const c of checks) print(`${c.ok ? 'ok  ' : 'fix '} ${c.text}`);
   const moved = checks.some((c) => c.check === 'position' && !c.ok);
@@ -438,8 +483,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   if (command === 'init') {
-    // --aimiru-url, or --sayso-url as the commands made before the rename (ADR-0093) say.
-    const url = [flags.aimiruUrl, flags.saysoUrl].find((v) => typeof v === 'string');
+    const url = typeof flags.aimiruUrl === 'string' ? flags.aimiruUrl : undefined;
     // Stopped from outside (Ctrl+C, a time limit, the terminal closing): the wait ends between polls
     // with the still waiting line and exit 0. A second signal ends it at once.
     const stopper = new AbortController();
@@ -451,7 +495,7 @@ export async function main(argv = process.argv.slice(2)) {
     for (const s of signals) process.on(s, onSignal);
     try {
       return await init({
-        saysoUrl: url,
+        aimiruUrl: url,
         pasteKey: flags.pasteKey === true,
         email: typeof flags.email === 'string' ? flags.email : null,
         waitS: typeof flags.wait === 'string' ? Number(flags.wait) : null,

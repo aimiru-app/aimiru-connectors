@@ -22,7 +22,7 @@
 // (POST /v1/tasks/take) and gives it to Claude as session context. Aimiru decides whether there is
 // one: its door, the person's grant for this agent, and this connector's version in the heartbeat;
 // a refusal is quiet. Never in claude -p or the SDK, never after a compaction (the same work going
-// on), never while paused. AIMIRU_TAKE_TASKS (or SAYSO_TAKE_TASKS) unset or 1 leaves it on, and any
+// on), never while paused. AIMIRU_TAKE_TASKS unset or 1 leaves it on, and any
 // other value turns it off; the heartbeat says which (environment.accepts_tasks). The session keeps
 // the job's id, signed, so each of its checks names the job until Claude records it done or not
 // done (post-tool-use.mjs). Whether Claude may call take_task itself is unchanged: only with
@@ -39,12 +39,12 @@
 // input, quoted as data, to take once if the person says so. Not after a compaction.
 // Prints no secret: never the key, never the Aimiru address.
 
-import { saysoToolName } from './vendor/classify.mjs';
+import { aimiruToolName } from './vendor/classify.mjs';
 import { sessionSandbox } from './lib/sandbox.mjs';
 import { sessionBaselineFor } from './vendor/newness.mjs';
 import { flushLocal } from './vendor/local.mjs';
 import { ackOnce, pauseHoldOn } from './vendor/pause-watch.mjs';
-import { briefOf, isDemoEnded, personsOwnJob, projectOf, sha256Hex } from './vendor/sayso-client.mjs';
+import { briefOf, isDemoEnded, personsOwnJob, projectOf, sha256Hex } from './vendor/aimiru-client.mjs';
 import { AGENT_CONTEXT, MESSAGES, TASKS_ASKED_AT_START, TASKS_OFF_HERE, lateYesContext, lateYesQuestion, notPersonsJob, resultsContext, taskContext } from './vendor/messages.mjs';
 import {
   CONNECTOR,
@@ -73,7 +73,7 @@ import {
 } from './lib/runtime.mjs';
 
 /** How Claude names the Aimiru tools this plugin's own server gives it (.claude-plugin/plugin.json). */
-const SAYSO_TOOL_PREFIX = saysoToolName('');
+const AIMIRU_TOOL_PREFIX = aimiruToolName('');
 
 /** Sessions that start new work: a compaction carries on the same work, so it takes no task. */
 const TAKING_SOURCES = new Set(['startup', 'resume', 'clear']);
@@ -153,7 +153,7 @@ async function main() {
     // on, off or unknown. With it on, programs the agent writes run as local work.
     sandbox: sandbox.state,
   };
-  // The Aimiru routine this plugin carries (skills/sayso/SKILL.md), so the person sees it (ADR-0037).
+  // The Aimiru routine this plugin carries (skills/aimiru/SKILL.md), so the person sees it (ADR-0037).
   const routine = skillVersion(settings);
   const local = localStateFor(settings, client);
   // This computer's own questions still open here, for a late yes (ADR-0094): only in the person's
@@ -249,7 +249,7 @@ async function main() {
       AGENT_CONTEXT,
       withBrief && brief.state === 'given' ? brief.text : null,
       task
-        ? taskContext(task, { recordTool: `${SAYSO_TOOL_PREFIX}record`, reportTool: `${SAYSO_TOOL_PREFIX}report_cant`, progress: true })
+        ? taskContext(task, { recordTool: `${AIMIRU_TOOL_PREFIX}record`, reportTool: `${AIMIRU_TOOL_PREFIX}report_cant`, progress: true })
         : null,
       resultsContext(results),
       routineNote,
@@ -271,7 +271,7 @@ async function main() {
     ? 'off'
     : taken?.ok
       ? 'open'
-      : taken && taken.kind === 'http' && (taken.status === 403 || taken.status === 404) && taken.fromSayso !== false
+      : taken && taken.kind === 'http' && (taken.status === 403 || taken.status === 404) && taken.fromAimiru !== false
         ? 'not_open'
         : (prior?.jobs ?? null);
   store.writeStatus({
@@ -303,7 +303,7 @@ async function main() {
   // A 401 page from something on the way (a login wall) is not Aimiru refusing the key.
   // A demo whose time is over says so, with the line that removes the plugin (wave 10, snag 12).
   if (isDemoEnded(hb)) systemMessage = client.demoEndedText;
-  else if (!hb.ok && hb.status === 401 && hb.fromSayso !== false) systemMessage = MESSAGES.reconnect(AGENT_LABEL);
+  else if (!hb.ok && hb.status === 401 && hb.fromAimiru !== false) systemMessage = MESSAGES.reconnect(AGENT_LABEL);
   else if (!onFailureBlock) systemMessage = MESSAGES.updateNeeded(MIN_ENFORCED_VERSION);
   else if (!hb.ok) systemMessage = client.pausedLocally() ? pausedLine(client.pausedLocally().explain) : MESSAGES.unreachableNow;
   else if (paused) systemMessage = pausedLine(hb.data?.explain);

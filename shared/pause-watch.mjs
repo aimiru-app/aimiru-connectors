@@ -3,7 +3,7 @@
 // (POST /v1/pause/ack), and how a held step learns that the Pause ended.
 //
 // One data folder is one agent on one computer, so everything here is per folder:
-//   paused.json        the pause memory (sayso-client.mjs createPauseMemory), with when it began here
+//   paused.json        the pause memory (aimiru-client.mjs createPauseMemory), with when it began here
 //   pause-seen.json    the last read of GET /v1/pause any process made: {at, paused, clear_at,
 //                      tried_at, next_at}, so the folder reads at most once every 3 s and a held
 //                      step can use the watcher's read
@@ -26,7 +26,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { PAUSE_TRACE_FILE, appendTrace, setting, sleep } from './sayso-client.mjs';
+import { PAUSE_TRACE_FILE, appendTrace, setting, sleep } from './aimiru-client.mjs';
 
 export const PAUSE_WATCH_VERSION = 1;
 /** At most one read of the Pause every this long, per agent on one computer (CONTRACT.md). */
@@ -45,7 +45,7 @@ const STEPS_KEPT = 500;
 /**
  * Whether a step holds while paused, or is refused at once as before (ADR-0022): the one switch the
  * Mac run decides for each maker (does it wait 90 s on a check). `defaultOn` is the connector's own
- * setting; AIMIRU_PAUSE_HOLD=0 (or SAYSO_PAUSE_HOLD=0) refuses instead, which is as safe: either way
+ * setting; AIMIRU_PAUSE_HOLD=0 refuses instead, which is as safe: either way
  * the step does not run while paused. The setting only narrows, as the others only shorten: it can
  * never turn on a hold the connector has off because its maker was not seen to wait (devrel review).
  */
@@ -327,7 +327,7 @@ export async function ackOnce(client, watch, { learnedBy = 'watch', local = null
     watch.trace({ event: 'acknowledged', learned_by: state.learned_by, steps_after: state.steps_after, acknowledged: acked, first: d.first === true, pause_at: d.pause_at ?? null, ms_after_tap: d.ms_after_tap ?? null });
     return { sent: true, ok: true, acked, ...d };
   }
-  const fromAimiru = r.kind === 'http' && r.fromSayso !== false;
+  const fromAimiru = r.kind === 'http' && r.fromAimiru !== false;
   if (fromAimiru && (r.status === 404 || r.status === 405)) {
     watch.writeAckState({ ...state, gone: true });
     watch.trace({ event: 'ack_unsupported', status: r.status });
@@ -350,7 +350,7 @@ export async function pollOnce(client, watch, { local = null, timeoutMs = 3_000,
   watch.noteTried(now());
   const r = await client.pause({ timeoutMs });
   if (!r.ok) {
-    const fromAimiru = r.kind === 'http' && r.fromSayso !== false;
+    const fromAimiru = r.kind === 'http' && r.fromAimiru !== false;
     if (fromAimiru && r.status === 401) return { ok: false, refused: true, status: 401, code: r.code ?? null };
     if (fromAimiru && r.status === 429) {
       const wait = Number.isFinite(r.retryAfterMs) ? Math.max(POLL_EVERY_MS, r.retryAfterMs) : POLL_EVERY_MS;

@@ -30,7 +30,7 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { findDataDir, loadSettings, VERSION } from './lib/runtime.mjs';
-import { normaliseBaseUrl, setting } from './vendor/sayso-client.mjs';
+import { normaliseBaseUrl, setting } from './vendor/aimiru-client.mjs';
 import { CLAUDE_CODE_CONNECT, MESSAGES, undoLineFor } from './vendor/messages.mjs';
 
 /** How long one message may take on the network. */
@@ -80,20 +80,20 @@ function given(value) {
 
 /**
  * The environment loadSettings reads, from the one Claude Code gives this server: its exported
- * CLAUDE_PLUGIN_* values, or the plugin.json env entries (SAYSO_PLUGIN_*) where those are missing,
+ * CLAUDE_PLUGIN_* values, or the plugin.json env entries (AIMIRU_PLUGIN_*) where those are missing,
  * and the plugin's data folder found the way /aimiru:connect finds it when neither names one.
  */
 export function toolServerEnv(env = process.env) {
   const out = { ...env };
-  for (const name of ['CLAUDE_PLUGIN_OPTION_AGENT_KEY', 'CLAUDE_PLUGIN_OPTION_SAYSO_URL', 'CLAUDE_PLUGIN_DATA']) {
+  for (const name of ['CLAUDE_PLUGIN_OPTION_AGENT_KEY', 'CLAUDE_PLUGIN_OPTION_AIMIRU_URL', 'CLAUDE_PLUGIN_DATA']) {
     if (given(out[name]) === undefined) delete out[name];
   }
-  const key = given(env.CLAUDE_PLUGIN_OPTION_AGENT_KEY) ?? given(env.SAYSO_PLUGIN_AGENT_KEY);
-  const url = given(env.CLAUDE_PLUGIN_OPTION_SAYSO_URL) ?? given(env.SAYSO_PLUGIN_URL);
+  const key = given(env.CLAUDE_PLUGIN_OPTION_AGENT_KEY) ?? given(env.AIMIRU_PLUGIN_AGENT_KEY);
+  const url = given(env.CLAUDE_PLUGIN_OPTION_AIMIRU_URL) ?? given(env.AIMIRU_PLUGIN_URL);
   if (key) out.CLAUDE_PLUGIN_OPTION_AGENT_KEY = key;
-  if (url) out.CLAUDE_PLUGIN_OPTION_SAYSO_URL = url;
-  delete out.SAYSO_PLUGIN_AGENT_KEY;
-  const dataDir = given(env.CLAUDE_PLUGIN_DATA) ?? given(env.SAYSO_PLUGIN_DATA);
+  if (url) out.CLAUDE_PLUGIN_OPTION_AIMIRU_URL = url;
+  delete out.AIMIRU_PLUGIN_AGENT_KEY;
+  const dataDir = given(env.CLAUDE_PLUGIN_DATA) ?? given(env.AIMIRU_PLUGIN_DATA);
   out.CLAUDE_PLUGIN_DATA = dataDir ?? findDataDir(out);
   return out;
 }
@@ -304,7 +304,7 @@ export function createToolServer({
         result: {
           protocolVersion,
           capabilities: { tools: { listChanged: true } },
-          serverInfo: { name: 'sayso', version: VERSION },
+          serverInfo: { name: 'aimiru', version: VERSION },
           instructions,
         },
       });
@@ -359,8 +359,8 @@ export function createToolServer({
    * reply that carries an error (even with HTTP 200) is not Aimiru back, or the tools would be said
    * to change on every try while Claude Code's own list keeps failing.
    */
-  const saysoAnswers = async (conn) => {
-    const probe = { jsonrpc: '2.0', id: 'sayso-probe', method: 'tools/list', params: lastMeta ? { _meta: lastMeta } : {} };
+  const aimiruAnswers = async (conn) => {
+    const probe = { jsonrpc: '2.0', id: 'aimiru-probe', method: 'tools/list', params: lastMeta ? { _meta: lastMeta } : {} };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), startTimeoutMs);
     try {
@@ -399,14 +399,14 @@ export function createToolServer({
   };
 
   /** Aimiru is back: the tools changed (Claude Code lists them again and gets Aimiru's own). */
-  const saysoBack = () => {
+  const aimiruBack = () => {
     stopRetrying();
     refusedKey = null;
     announceToolsChanged();
   };
 
   /** Aimiru did not answer the start: try it again in the background until it does. */
-  const retrySayso = () => {
+  const retryAimiru = () => {
     if (retrier || retryMs <= 0) return;
     retrier = setInterval(async () => {
       if (probing) return;
@@ -415,7 +415,7 @@ export function createToolServer({
       if (!conn || conn.token === refusedKey) return;
       probing = true;
       try {
-        if (retrier && (await saysoAnswers(conn))) saysoBack();
+        if (retrier && (await aimiruAnswers(conn))) aimiruBack();
       } finally {
         probing = false;
       }
@@ -448,7 +448,7 @@ export function createToolServer({
           stopRetrying();
           owedNotice = false;
         } else if (retrier) {
-          saysoBack();
+          aimiruBack();
         }
       }
     };
@@ -459,7 +459,7 @@ export function createToolServer({
         if (refused) refusedKey = conn.token;
         const said = !refused ? TOOL_SERVER_MESSAGES.instructionsUnreachable : text === TOOL_SERVER_MESSAGES.demoEnded ? text : TOOL_SERVER_MESSAGES.instructionsKeyRefused;
         answerHere(message, said);
-        retrySayso();
+        retryAimiru();
         return;
       }
       write(rpcError(message.id, code, text));
@@ -471,7 +471,7 @@ export function createToolServer({
           method: 'POST',
           headers,
           body: JSON.stringify(message),
-          // Never forward the key to another host, as the hooks' client (vendor/sayso-client.mjs):
+          // Never forward the key to another host, as the hooks' client (vendor/aimiru-client.mjs):
           // a redirect is refused and reads as Aimiru not reached.
           redirect: 'error',
           signal: pending.controller.signal,

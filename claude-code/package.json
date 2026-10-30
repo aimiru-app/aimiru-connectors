@@ -1,6 +1,6 @@
 {
-  "name": "sayso-claude-code",
-  "version": "0.3.0-rc.2",
+  "name": "aimiru-claude-code",
+  "version": "0.3.0-rc.3",
   "private": true,
   "description": "Aimiru for Claude Code: a Claude Code plugin, installed with `claude plugin install` from the aimiru-connectors marketplace, not from npm.",
   "license": "MIT",

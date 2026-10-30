@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { programHints, repositoryOf } from './classify.mjs';
-import { redactSecrets, truncate } from './sayso-client.mjs';
+import { redactSecrets, truncate } from './aimiru-client.mjs';
 
 const GIT_TIMEOUT_MS = 3_000;
 const PROGRAM_READ_LIMIT = 16 * 1024 * 1024;

@@ -14,7 +14,7 @@
 //                   alone (a short commit id or a count). A git remote's git@host is no one's
 //                   address.
 //
-// Run after the shared redaction (sayso-client.mjs redactSecrets), so keys and card numbers are
+// Run after the shared redaction (aimiru-client.mjs redactSecrets), so keys and card numbers are
 // already out. Never used on what Aimiru checks step by step: that is unchanged.
 // Claude Code and Codex carry a copy (TARGET_ONLY_FILES in scripts/sync-shared.mjs).
 

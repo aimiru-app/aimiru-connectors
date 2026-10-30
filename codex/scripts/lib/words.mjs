@@ -99,6 +99,10 @@ export const WORDS = Object.freeze({
   copied: (dir) => `Put the check in ${dir}, so it keeps working when this download is cleared.`,
   backedUp: (file) => `Kept a copy of Codex's earlier settings at ${file}.`,
   savedKey: (file) => `Saved the key to ${file}, readable only by you.`,
+  // An install from before Aimiru's files moved (ADR-0164): the same Codex in Aimiru, kept.
+  carriedKey: 'Found the key an earlier install of Aimiru saved for Codex, so Codex stays the same agent in Aimiru.',
+  earlierRemoved: (dir) => `Removed the earlier install's copy of the check and its key from ${dir}.`,
+  removeEarlierAgent: 'Codex is connected as a new agent in Aimiru. Remove the earlier Codex under Agents, so its key stops working.',
   notWindows: "Aimiru's check for Codex runs on macOS and Linux for now, so nothing was changed on this computer.",
   notAKey: 'That does not look like an Aimiru key. Copy it again from Aimiru, under Agents, Codex.',
   noKey: 'No key saved, so Codex is not connected yet. Run this again with your Aimiru key, or connect by code.',

@@ -1,8 +1,8 @@
 ---
-name: sayso
+name: aimiru
 description: The Aimiru routine. Use it at the start of every session, and before you spend money, send a message, share something, book, delete anything or sign in for the person. It says when to check with Aimiru, what to do while a question to the person stays open, and how to record what happened.
 metadata:
-  sayso-routine-version: "6"
+  aimiru-routine-version: "6"
 ---
 
 # The Aimiru routine

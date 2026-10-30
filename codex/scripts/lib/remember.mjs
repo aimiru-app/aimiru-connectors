@@ -8,7 +8,7 @@
 //
 // Codex's own check reads this command like any other (the live check is not changed for it).
 
-import { redactSecrets } from '../vendor/sayso-client.mjs';
+import { redactSecrets } from '../vendor/aimiru-client.mjs';
 import { PACKAGE_NAME, loadSettings, makeClient } from './runtime.mjs';
 import { JOB_WORDS } from './words.mjs';
 
@@ -78,7 +78,7 @@ export async function remember(o = {}) {
     print(state === 'kept' ? JOB_WORDS.rememberKept : state === 'learned' ? JOB_WORDS.rememberLearned : JOB_WORDS.rememberWaiting);
     return 0;
   }
-  if (r.kind === 'http' && r.fromSayso !== false) {
+  if (r.kind === 'http' && r.fromAimiru !== false) {
     if ([409, 422, 429].includes(r.status) && said(r)) {
       print(JOB_WORDS.rememberRefused(said(r)));
       return 1;

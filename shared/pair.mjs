@@ -19,7 +19,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createSaysoClient, normaliseBaseUrl, sleep as realSleep } from './sayso-client.mjs';
+import { createAimiruClient, normaliseBaseUrl, sleep as realSleep } from './aimiru-client.mjs';
 
 /** Seconds between polls the server asks for, and its floor (it answers slow_down under 300 ms). */
 export const PAIR_INTERVAL_MS = 3_000;
@@ -77,8 +77,8 @@ function headersFor(connector) {
     accept: 'application/json',
     'content-type': 'application/json',
     // Some hosts turn default user agents away before Aimiru sees the request (llms.txt).
-    'user-agent': `${connector || 'sayso-connector'} (pairing)`,
-    'x-sayso-connector': connector || 'unknown/0.0.0',
+    'user-agent': `${connector || 'aimiru-connector'} (pairing)`,
+    'x-aimiru-connector': connector || 'unknown/0.0.0',
   };
 }
 
@@ -95,7 +95,7 @@ async function post(fetchImpl, url, body, connector, timeoutMs = 10_000) {
     });
     text = await res.text();
   } catch {
-    return { status: 0, data: null, fromSayso: false, retryAfter: null };
+    return { status: 0, data: null, fromAimiru: false, retryAfter: null };
   }
   let data = null;
   try {
@@ -103,9 +103,9 @@ async function post(fetchImpl, url, body, connector, timeoutMs = 10_000) {
   } catch {
     data = null;
   }
-  const fromSayso = Boolean(data && typeof data === 'object' && (typeof data.status === 'string' || typeof data.error?.code === 'string' || typeof data.pair_id === 'string'));
+  const fromAimiru = Boolean(data && typeof data === 'object' && (typeof data.status === 'string' || typeof data.error?.code === 'string' || typeof data.pair_id === 'string'));
   const ra = Number(res.headers.get('retry-after'));
-  return { status: res.status, data, fromSayso, retryAfter: Number.isFinite(ra) ? ra : null };
+  return { status: res.status, data, fromAimiru, retryAfter: Number.isFinite(ra) ? ra : null };
 }
 
 /**
@@ -141,7 +141,7 @@ export async function startPairing({ baseUrl, agent, connector, personEmail = nu
     };
   }
   if (r.status === 0) return { ok: false, reason: 'unreachable', message: PAIR_MESSAGES.unreachable };
-  if (!r.fromSayso) return { ok: false, reason: 'refused', message: PAIR_MESSAGES.refused(r.status) };
+  if (!r.fromAimiru) return { ok: false, reason: 'refused', message: PAIR_MESSAGES.refused(r.status) };
   if (r.status === 429) return { ok: false, reason: 'limited', message: PAIR_MESSAGES.limited(r.retryAfter ?? 60) };
   if (r.status === 400) return { ok: false, reason: 'bad_request', message: r.data?.error?.message || PAIR_MESSAGES.unreachable };
   return { ok: false, reason: 'unreachable', message: PAIR_MESSAGES.unreachable };
@@ -153,9 +153,9 @@ export async function pollPairing({ baseUrl, pairId, pollSecret, connector, fetc
   if (r.status === 200 && typeof r.data?.agent_key === 'string') return { status: 'approved', data: r.data };
   if (r.status === 428) return { status: 'waiting', data: r.data };
   if (r.status === 429) return { status: 'slow_down', data: r.data };
-  if (r.status === 403 && r.fromSayso) return { status: 'declined', data: r.data };
-  if (r.status === 410 && r.fromSayso) return { status: r.data?.status === 'used' ? 'used' : 'expired', data: r.data };
-  if (r.status === 404 && r.fromSayso) return { status: 'not_found', data: r.data };
+  if (r.status === 403 && r.fromAimiru) return { status: 'declined', data: r.data };
+  if (r.status === 410 && r.fromAimiru) return { status: r.data?.status === 'used' ? 'used' : 'expired', data: r.data };
+  if (r.status === 404 && r.fromAimiru) return { status: 'not_found', data: r.data };
   return { status: 'error', data: r.data, httpStatus: r.status };
 }
 
@@ -298,7 +298,7 @@ export async function waitForPractice({ baseUrl, agentKey, practice, connector, 
     return { status: 'nowhere', seconds: null };
   }
   say(PAIR_MESSAGES.practice);
-  const client = createSaysoClient({ baseUrl, token: agentKey, connector: connector || 'unknown/0.0.0', ...(fetchImpl ? { fetch: fetchImpl } : {}) });
+  const client = createAimiruClient({ baseUrl, token: agentKey, connector: connector || 'unknown/0.0.0', ...(fetchImpl ? { fetch: fetchImpl } : {}) });
   const t0 = now();
   const answer = await client.waitForApproval(practice.exception_id, { budgetMs });
   const seconds = Math.max(1, Math.round((now() - t0) / 1000));
@@ -326,14 +326,17 @@ export function writeKeyFile(file, { agentKey, baseUrl, agentId = null, name = n
 /**
  * Reads a key file written by writeKeyFile: {key, baseUrl, agentId, name}, or null when it is
  * missing, unreadable, not a key, or readable by others (on systems with permissions), so a key
- * someone else could have written or read is never used.
+ * someone else could have written or read is never used. A key is a short lower-case word, _agt_,
+ * then 43 characters: keys Aimiru issues now start aimiru_agt_, and one issued before the product's
+ * rename keeps its own word and keeps working (ADR-0164). Aimiru, not this shape, decides whether a
+ * key is good.
  */
 export function readKeyFile(file) {
   try {
     const st = fs.statSync(file);
     if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) return null;
     const v = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!v || typeof v.key !== 'string' || !/^sayso_agt_[A-Za-z0-9_-]{43}$/.test(v.key)) return null;
+    if (!v || typeof v.key !== 'string' || !/^[a-z]{3,12}_agt_[A-Za-z0-9_-]{43}$/.test(v.key)) return null;
     return { key: v.key, baseUrl: typeof v.base_url === 'string' ? v.base_url : null, agentId: v.agent_id ?? null, name: v.name ?? null };
   } catch {
     return null;

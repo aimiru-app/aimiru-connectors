@@ -10,7 +10,7 @@
 // install that finds an entry of its own leaves it exactly where it is: unchanged when it is the same,
 // rewritten in place when it changed (Codex asks the person to trust it again), never moved.
 //
-// The check runs from a copy in ~/.sayso/codex/app, not from where npx unpacked this package (npx
+// The check runs from a copy in ~/.aimiru/codex/app, not from where npx unpacked this package (npx
 // clears its cache), with the Node.js that ran the install, named by the steadiest path PATH has for
 // it (stableNodePath). The command line stays the same across updates of the copy, so Codex keeps the
 // person's trust in it; a new Node.js path, or a first install, is a new command, which Codex skips
@@ -102,10 +102,64 @@ export function ourHandler({ nodePath, appDir }) {
   return { type: 'command', command: guardCommand({ nodePath, appDir }), timeout: CODEX_TIMEOUT_S, statusMessage: STATUS_MESSAGE };
 }
 
+/**
+ * True for a command this installer wrote for a check copy outside appDir: its own shape
+ * (/usr/bin/env clearing NODE_OPTIONS and NODE_PATH, then Node.js and the script, each in double
+ * quotes), with the script at <a folder whose name starts with a dot>/codex/app/<script>. That is
+ * ~/.aimiru/codex/app when this install uses another data folder, or the copy an install made before
+ * Aimiru's files moved to ~/.aimiru (ADR-0164). So installing again rewrites that entry in place,
+ * where Codex keeps the person's trust, and uninstall takes it out.
+ */
+export function isEarlierCopy(command, script) {
+  const m = /-u NODE_OPTIONS -u NODE_PATH "[^"]+" "([^"]+)"/.exec(String(command ?? ''));
+  if (!m) return false;
+  const parts = m[1].split(/[\\/]/);
+  const n = parts.length;
+  return n >= 5 && parts[n - 1] === script && parts[n - 2] === 'app' && parts[n - 3] === 'codex' && /^\.[A-Za-z0-9_-]+$/.test(parts[n - 4]);
+}
+
+/**
+ * The data folder (<dot folder>/codex) of an earlier check copy Codex's hooks.json still runs: the
+ * first entry of ours, at either event, whose copy is not appDir (isEarlierCopy). Null when there is
+ * none, or hooks.json cannot be read. init carries that install's key over and then removes its copy
+ * and key (ADR-0164), so nothing is left running, or holding a key, where no check of this release
+ * looks.
+ */
+export function earlierDataDir({ codexHome, appDir }) {
+  let data;
+  try {
+    data = readHooksFile(hooksFileOf(codexHome)).data;
+  } catch {
+    return null;
+  }
+  const here = path.resolve(appDir);
+  for (const [event, script] of [['PreToolUse', 'guard.mjs'], ['SessionStart', 'brief.mjs']]) {
+    for (const g of Array.isArray(data.hooks[event]) ? data.hooks[event] : []) {
+      for (const h of Array.isArray(g?.hooks) ? g.hooks : []) {
+        const command = typeof h?.command === 'string' ? h.command : '';
+        if (!isEarlierCopy(command, script)) continue;
+        const file = commandPaths(command)?.guardPath;
+        if (file && path.resolve(path.dirname(file)) !== here) return path.dirname(path.dirname(file));
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Removes an earlier install's check copy, its key and its waiting request to connect (earlierDataDir),
+ * once Codex's entries run this copy. The rest of that folder stays. Returns the folder.
+ */
+export function removeEarlierCopy(dir) {
+  fs.rmSync(path.join(dir, 'app'), { recursive: true, force: true });
+  for (const name of ['key.json', 'pairing.json']) fs.rmSync(path.join(dir, name), { force: true });
+  return dir;
+}
+
 /** True for a handler that runs a guard from an Aimiru check copy (this one, or an older install's). */
 export function isOurs(handler, appDir) {
   const command = typeof handler?.command === 'string' ? handler.command : '';
-  return command.includes(path.join(appDir, 'guard.mjs')) || /[\\/]\.sayso[\\/]codex[\\/]app[\\/]guard\.mjs/.test(command);
+  return command.includes(path.join(appDir, 'guard.mjs')) || isEarlierCopy(command, 'guard.mjs');
 }
 
 /**
@@ -126,7 +180,7 @@ export function ourBriefHandler({ nodePath, appDir }) {
 /** True for a handler that runs the brief from an Aimiru check copy (this one, or another install's). */
 export function isOurBrief(handler, appDir) {
   const command = typeof handler?.command === 'string' ? handler.command : '';
-  return command.includes(path.join(appDir, 'brief.mjs')) || /[\\/]\.sayso[\\/]codex[\\/]app[\\/]brief\.mjs/.test(command);
+  return command.includes(path.join(appDir, 'brief.mjs')) || isEarlierCopy(command, 'brief.mjs');
 }
 
 /** Copies the check (guard, check, its background sender, its library and the shared code) into appDir, replacing an older copy. */
@@ -243,7 +297,7 @@ export function installHook({ codexHome, appDir, nodePath, now = new Date() }) {
   let backup = null;
   if (changed) {
     if (exists) {
-      backup = `${file}.sayso-backup-${now.toISOString().replace(/[:.]/g, '-')}`;
+      backup = `${file}.aimiru-backup-${now.toISOString().replace(/[:.]/g, '-')}`;
       fs.copyFileSync(file, backup);
     }
     writeAtomic(file, `${JSON.stringify(data, null, 2)}\n`);

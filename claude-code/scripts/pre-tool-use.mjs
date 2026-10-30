@@ -39,9 +39,9 @@
 // "onFailure": "block" so Claude Code blocks the call (Claude Code 2.1.295 or later).
 
 import path from 'node:path';
-import { NEW_PROGRAM_RESOURCE, actionForClaudeCodeTool, isSaysoTool, makerProtectedPaths } from './vendor/classify.mjs';
+import { NEW_PROGRAM_RESOURCE, actionForClaudeCodeTool, isAimiruTool, makerProtectedPaths } from './vendor/classify.mjs';
 import { cartFacts, ucpScope, withRememberedCart } from './vendor/checkout.mjs';
-import { ASKS_TRACE_FILE, appendTrace, askHoldMs, isFailClosed, projectOf, quietUntilOf } from './vendor/sayso-client.mjs';
+import { ASKS_TRACE_FILE, appendTrace, askHoldMs, isFailClosed, projectOf, quietUntilOf } from './vendor/aimiru-client.mjs';
 import { MESSAGES, clockOf, personSaidNo, waitWords, withName } from './vendor/messages.mjs';
 import { createLocalState, localDecision, localRecord } from './vendor/local.mjs';
 import { ackOnce, holdCeilingMs, holdWhilePaused, pauseHoldOn, yesBeforeLastPause } from './vendor/pause-watch.mjs';
@@ -199,7 +199,7 @@ const fullyKnown = (keys) => keys.every((k) => /^[0-9a-f]{64}$/.test(String(k.sh
 
 /** "You said no" only when the person did; a pause or a removed key while waiting says so instead. */
 function deniedReason(answer) {
-  if (answer.reason === 'sayso') return personSaidNo(answer.explain);
+  if (answer.reason === 'aimiru') return personSaidNo(answer.explain);
   return answer.explain || MESSAGES.doNotAct;
 }
 
@@ -256,7 +256,7 @@ async function main() {
   }
   const toolName = input?.tool_name;
   // Aimiru's own tools, only when Claude Code says they come from the Aimiru plugin's own server.
-  if (toolName && isSaysoTool(toolName, input?.mcp_server)) {
+  if (toolName && isAimiruTool(toolName, input?.mcp_server)) {
     const ti = input?.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {};
     // The person set this computer not to pick up handed-off work (ADR-0043 review): Claude may not
     // take a task with Aimiru's own tool either, whatever the routine in its instructions says.
@@ -559,7 +559,7 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
         return onPaused(answer.explain || MESSAGES.paused);
       } else if (answer.status === 'denied') {
         store.deletePending(fp);
-        traceAsk({ kind: 'answered', exception_id: pending.exceptionId, outcome: answer.reason === 'sayso' ? 'denied' : answer.reason });
+        traceAsk({ kind: 'answered', exception_id: pending.exceptionId, outcome: answer.reason === 'aimiru' ? 'denied' : answer.reason });
         deny(deniedReason(answer));
         return;
       } else if (answer.status === 'waiting') {
@@ -590,7 +590,7 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
       context,
       deadlineMs: deadline,
       run: runOf(input, settings.projectDir || input.cwd),
-      // The project or client folder Claude Code works in (ADR-0056): its name, or AIMIRU_PROJECT (or SAYSO_PROJECT),
+      // The project or client folder Claude Code works in (ADR-0056): its name, or AIMIRU_PROJECT,
       // and a hash of its full path worked out here, so the person's rules can name the project.
       project: projectOf(settings.projectDir || input.cwd),
       // The person's job this session took at its start, so they can follow its steps live
@@ -599,7 +599,7 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
     });
     // A remembered pause answered because Aimiru could not: Aimiru is down too.
     if (d.reason === 'unreachable' || d.reason === 'bad_response' || d.remembered) store.markDown(DOWN_WINDOW_MS);
-    else if (d.reason === 'sayso') store.markUp();
+    else if (d.reason === 'aimiru') store.markUp();
 
     if (d.decision === 'allow') {
       remember({ actionId: d.actionId ?? null, unchecked: Boolean(d.failOpen), reasonUnchecked: d.failOpen ? d.reason : null });

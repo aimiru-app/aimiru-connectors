@@ -26,7 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 // A phone, card or account number (contacts.mjs, which the runner's notes and results use too).
 import { hasLongNumber } from './contacts.mjs';
-import { redactSecrets } from './sayso-client.mjs';
+import { redactSecrets } from './aimiru-client.mjs';
 
 /** The most lines one import sends: also the most one agent may add to Memory in a day. */
 export const IMPORT_MAX = 30;
@@ -213,7 +213,7 @@ const COMMAND = /^(\$|>|sudo|npm|npx|bun|bunx|pnpm|yarn|git|node|deno|python3?|p
 const SHELLISH = /(\s--?[a-z][\w-]*|&&|\|\||\b[A-Z][A-Z0-9_]{2,}=|\w\(\))/;
 // Words for the person's permissions, or Aimiru itself (packages/core PERMISSION_TALK and INSTRUCTION).
 const PERMISSION_TALK =
-  /\b(aimiru|sayso|approv\w*|permission\w*|bypass\w*|force[- ]?push\w*|authori[sz]\w*|pre-?approv\w*|unlimited|spending limit|spend limit|spending cap|spend cap|unasked|unprompted|unreviewed|unattended|dangerously|yolo|auto-?(?:approv|accept|merg|deploy|publish)\w*)\b|\bbudget\s+(is|of|for|limit|cap|up to)\b|\b(pay|spend|buy)\s+up\s+to\b/i;
+  /\b(aimiru|approv\w*|permission\w*|bypass\w*|force[- ]?push\w*|authori[sz]\w*|pre-?approv\w*|unlimited|spending limit|spend limit|spending cap|spend cap|unasked|unprompted|unreviewed|unattended|dangerously|yolo|auto-?(?:approv|accept|merg|deploy|publish)\w*)\b|\bbudget\s+(is|of|for|limit|cap|up to)\b|\b(pay|spend|buy)\s+up\s+to\b/i;
 /**
  * A step said to happen with no look from the person: a standing permission dressed as a preference
  * ("Prefers deletes to run unasked", "Prefers that payments under 500 go through", "Prefers
@@ -623,7 +623,7 @@ export async function sendLines({ client, lines, timeoutMs = 10_000 }) {
       sent.push(lineFingerprint(line.text));
       continue;
     }
-    const fromAimiru = r.kind === 'http' && r.fromSayso !== false;
+    const fromAimiru = r.kind === 'http' && r.fromAimiru !== false;
     if (fromAimiru && r.status === 422) {
       results.push({ n: line.n, text: line.text, result: 'refused', said: said(r) });
       // Refused once is refused again: not sent from this computer a second time.

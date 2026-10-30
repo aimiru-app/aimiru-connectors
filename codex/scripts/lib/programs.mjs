@@ -17,11 +17,11 @@ export const PROGRAM_YES_TTL_MS = 24 * 3600_000;
 const sha256Hex = (s) => createHash('sha256').update(String(s)).digest('hex');
 
 function sessionMac(secret, session, baseline) {
-  return createHmac('sha256', `sayso-session:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(baseline ?? null)}`).digest('hex');
+  return createHmac('sha256', `aimiru-session:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(baseline ?? null)}`).digest('hex');
 }
 
 function programMac(secret, session, file, sha256, ts) {
-  return createHmac('sha256', `sayso-program:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(String(file ?? ''))}\n${sha256}\n${ts}`).digest('hex');
+  return createHmac('sha256', `aimiru-program:${secret}`).update(`${JSON.stringify(String(session ?? ''))}\n${JSON.stringify(String(file ?? ''))}\n${sha256}\n${ts}`).digest('hex');
 }
 
 function macEqual(a, b) {
