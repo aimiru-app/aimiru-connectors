@@ -507,7 +507,7 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
             context.native_prompt = native.native_prompt;
             if (native.estimated) context.native_prompt_estimated = true;
           }
-          const record = localRecord({ action, context, project: projectOf(settings.projectDir || input.cwd), file: decided.file });
+          const record = localRecord({ action, context, project: projectOf(settings.projectDir || input.cwd), file: decided.file, taskId: store.sessionTask(input.session_id) });
           if (local.append(record, decided.file.snapshot)) {
             try {
               store.putCall(input.tool_use_id, { class: action.class, description: action.description, local: true });

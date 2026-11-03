@@ -17,7 +17,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { READ_ONLY_BUILTINS, splitMcpToolName } from './classify.mjs';
-import { createSpool, readReach, setting, sha256Hex, sleep } from './aimiru-client.mjs';
+import { createSpool, readReach, setting, sha256Hex, sleep, taskIdOf } from './aimiru-client.mjs';
 
 /**
  * The only (class, resource) pairs that can ever be decided on this computer. The same list is in
@@ -354,10 +354,13 @@ function recordContext(context) {
 /**
  * One read decided here, as the connector sends it (contract §1.1 "Local record"): age_ms is this
  * computer's own elapsed time since it received the snapshot (it decides whether a sealed snapshot
- * covered it, so a wrong clock never matters); `at` is this computer's clock, for display.
+ * covered it, so a wrong clock never matters); `at` is this computer's clock, for display. A read
+ * inside the person's job names the job's task, as a check sent to Aimiru does (ADR-0157), so the
+ * job's record holds every step; Aimiru keeps it only for an open task this agent took.
  */
-export function localRecord({ action, context = {}, project = null, file, now = Date.now() }) {
+export function localRecord({ action, context = {}, project = null, file, taskId = null, now = Date.now() }) {
   const evidence = typeof action?.evidence === 'string' && action.evidence ? action.evidence : null;
+  const task = taskIdOf(taskId);
   return {
     local_id: randomUUID(),
     at: new Date(now).toISOString(),
@@ -371,6 +374,7 @@ export function localRecord({ action, context = {}, project = null, file, now = 
     context: recordContext(context),
     project: project && typeof project === 'object' && project.label ? { label: project.label, hash: project.hash ?? null } : null,
     snapshot: file.view.issued_at,
+    ...(task ? { task_id: task } : {}),
   };
 }
 

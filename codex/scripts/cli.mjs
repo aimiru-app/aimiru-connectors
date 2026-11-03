@@ -112,7 +112,8 @@ Usage:
       --none                           send none, and forget the lines shown
   ${PACKAGE_NAME} uninstall            take Aimiru's check and brief out of Codex
 
-After init, open Codex, type /hooks and trust "Checking with Aimiru" and "Aimiru's brief".`;
+After init, one step in Codex, for Aimiru's check and its brief:
+${WORDS.trustHow('/hooks')}`;
 
 /** Flags that take no value: the word after one is never read as its value. */
 const SWITCHES = new Set(['watch', 'json', 'pasteKey', 'help', 'version', 'send', 'none']);

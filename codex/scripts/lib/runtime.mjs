@@ -10,7 +10,7 @@ import { createPauseWatch } from '../vendor/pause-watch.mjs';
 import { ASK_HOLD_MS, createAimiruClient, setting, sha256Hex } from '../vendor/aimiru-client.mjs';
 
 export const CONNECTOR = 'codex';
-export const VERSION = '0.3.0-rc.3';
+export const VERSION = '0.3.0-rc.4';
 /** The npm package (ADR-0091): unscoped, a command people run with npx, like aimiru-mcp-proxy. */
 export const PACKAGE_NAME = 'aimiru-codex';
 /** The line that removes the check (wave 10, shapes 3), word for word as the demo page and the README show it. */

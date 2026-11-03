@@ -18,37 +18,53 @@ export const STOPPED_REASON = "Aimiru: Aimiru's check for Codex stopped before i
  */
 export const NO_ANSWER_REASON = 'Aimiru: the check for Codex did not answer, so this did not run. If this keeps happening, run the install line from Aimiru again, under Agents, Codex';
 
-/** The name Codex shows next to the check while it runs, and in its list of checks to trust. */
+/**
+ * The status line Codex shows while the check runs. Codex's list of checks does not show it, so no
+ * sentence asks the person to find the check by this name (trustHow).
+ */
 export const STATUS_MESSAGE = 'Checking with Aimiru';
 
-/** The name Codex shows next to the brief entry at session start, and in its list to trust (ADR-0157). */
+/** The status line Codex shows while the brief entry runs at session start (ADR-0157); not in its list either. */
 export const BRIEF_STATUS_MESSAGE = "Aimiru's brief";
+
+/**
+ * How the person trusts Aimiru's entries, in what Codex shows them (Codex 0.165.0 and 0.166.0): as it
+ * starts, Codex says "<N> hooks need review before they can run." and offers trust all; its /hooks
+ * screen lists entries by when they run ("Before a tool executes", "When a new session starts"),
+ * never by the status lines above. Every sentence that asks the person to trust Aimiru's entries says
+ * it this one way (the founder's run of 2 Nov 2026: he looked for "Checking with Aimiru" in /hooks,
+ * found nothing, and took it for broken, though trust all at start had worked).
+ */
+const trustHow = (command) => `Open Codex in your project. When it says checks need review, choose trust all only if every check it lists is Aimiru's (their commands name .aimiru); otherwise type ${command} and trust only Aimiru's.`;
 
 /**
  * What `take` and `remember` say (ADR-0157), and the doctor's lines about each entry's trust. Kept
  * apart from WORDS only for reading; test/take.test.mjs lints every value the same way.
  */
 export const JOB_WORDS = Object.freeze({
-  // The trust step for the brief, after the check's (init).
-  trustBrief: (command) => `Then trust "${BRIEF_STATUS_MESSAGE}" there too, so Aimiru gives Codex your brief as each session starts.`,
+  // The brief, after the check's trust step (init): trust all, or trusting Aimiru's in /hooks, takes in both.
+  trustBrief: () => "Trusting them covers Aimiru's brief too, so Aimiru gives Codex your brief as each session starts.",
   // The doctor, per entry, from Codex's own settings (never "read": Aimiru gives the brief).
   checkTrusted: `Codex trusts "${STATUS_MESSAGE}" where it is in Codex's settings.`,
-  checkUntrusted: (command) => `Codex has not trusted "${STATUS_MESSAGE}" yet, so it skips it. Open Codex, type ${command}, and trust "${STATUS_MESSAGE}".`,
-  checkChanged: (command) => `"${STATUS_MESSAGE}" changed since you trusted it, so Codex skips it. Run the install line again, then trust it in ${command}.`,
+  checkUntrusted: (command) => `Codex has not trusted Aimiru's check yet, so it skips it. ${trustHow(command)}`,
+  checkChanged: (command) => `Aimiru's check changed since you trusted it, so Codex skips it. Run the install line again, then trust it again. ${trustHow(command)}`,
   briefTrusted: `Codex trusts "${BRIEF_STATUS_MESSAGE}", so Aimiru gives Codex your brief as each session starts.`,
-  briefUntrusted: (command) => `Codex has not trusted "${BRIEF_STATUS_MESSAGE}" yet, so it starts without your brief. Open Codex, type ${command}, and trust "${BRIEF_STATUS_MESSAGE}".`,
-  briefChanged: (command) => `"${BRIEF_STATUS_MESSAGE}" changed since you trusted it, so Codex skips it. Run the install line again, then trust it in ${command}.`,
+  briefUntrusted: (command) => `Codex has not trusted Aimiru's brief yet, so it starts without your brief. ${trustHow(command)}`,
+  briefChanged: (command) => `Aimiru's brief changed since you trusted it, so Codex skips it. Run the install line again, then trust it again. ${trustHow(command)}`,
   briefMissing: `"${BRIEF_STATUS_MESSAGE}" is not in Codex's settings. Run the install line again.`,
   briefOff: `You turned "${BRIEF_STATUS_MESSAGE}" off in Codex. Turn it back on in Codex, under the same command.`,
   trustUnknown: "Codex's settings could not be opened, so whether Codex trusts Aimiru's entries is not known.",
   // take: before anything is taken.
   takeNoKey: (install) => `Codex is not connected to Aimiru yet, so no job was taken. Run ${install} first.`,
+  // Only the check's report reaching Aimiru counts as its run (ranSinceInstall), so a person who
+  // trusted it while offline is told to let one more command run online.
   takeNotChecked: (command) =>
-    `No job was taken, because Codex has not run Aimiru's check where it is now since it was installed, so it could run the job unchecked. Open Codex, type ${command}, trust "${STATUS_MESSAGE}" and let Codex run one command, then run this again.`,
+    `No job was taken, because Codex has not run Aimiru's check where it is now since it was installed, so it could run the job unchecked. ${trustHow(command)} Then let Codex run one command, and run this again. If you already trusted them, let Codex run one more command while online.`,
   // The settings file to change is passed in (quality review): Codex's own, or the project's.
   takeChecksOff: (file) => `No job was taken, because Codex's checks are turned off, so Codex would skip Aimiru. Turn them back on in ${file}, then run this again.`,
   takeProjectChecks: (file) => `No job was taken, because ${file} has a setting of its own for Codex's checks, which could turn Aimiru's off. Take that setting out, then run this again.`,
-  takeTurnedOff: (command) => `No job was taken, because you turned Aimiru's check off in Codex. Open Codex, type ${command}, and turn "${STATUS_MESSAGE}" back on.`,
+  // Under the heading Codex's /hooks screen gives the check, never a name it does not list.
+  takeTurnedOff: (command) => `No job was taken, because you turned Aimiru's check off in Codex. Open Codex, type ${command}, and turn Aimiru's check back on, under "Before a tool executes".`,
   takeNoFolder: (dir) => `There is no folder at ${dir}, so no job was taken.`,
   takeNotPerson: 'Run this yourself, in a terminal of your own: it takes no job from inside an agent or a script.',
   takeHomeFolder: (dir) => `Run this in your project's folder, not ${dir}: Codex would work in your whole home folder.`,
@@ -114,7 +130,9 @@ export const WORDS = Object.freeze({
   notReported: 'Aimiru could not be reached to say Codex is set up. It will hear from Codex the first time the check runs.',
   // The trust step (OpenAI: Codex skips a new or changed check until the person trusts it).
   trustTitle: 'One step left, in Codex:',
-  trustStep: (command) => `Open Codex, type ${command}, and trust "${STATUS_MESSAGE}". Until you do, Codex skips it, and Aimiru shows Codex as Advised.`,
+  // The one way every sentence asks the person to trust Aimiru's entries (above).
+  trustHow,
+  trustStep: (command) => `${trustHow(command)} Until you do, Codex skips them, and Aimiru shows Codex as Advised.`,
   trustThen: 'After that, the first time Codex runs a command, Aimiru shows Codex as Guardrail.',
   // Aimiru's own words (Mac run part 1, item 4): never a paraphrase passed off as OpenAI's.
   limit: "Codex's checks are a guard, not a wall: Codex's web search, and what it types into a command that is already running, skip them.",
@@ -137,5 +155,5 @@ export const WORDS = Object.freeze({
       : "Aimiru's check moved in Codex's settings since you trusted it, so Codex skips it until you trust it again.",
   // An entry an older install wrote gives the check 60 seconds, too short to hold a step while paused.
   doctorOldEntry: (install, trust) =>
-    `Aimiru's check in Codex's settings is from an older install, so each step is refused while you have paused. Run ${install} again, then type ${trust} in Codex and trust "${STATUS_MESSAGE}", so a Pause holds Codex's next step.`,
+    `Aimiru's check in Codex's settings is from an older install, so each step is refused while you have paused. Run ${install} again, then trust it again, so a Pause holds Codex's next step. ${trustHow(trust)}`,
 });

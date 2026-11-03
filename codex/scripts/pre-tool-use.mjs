@@ -483,7 +483,7 @@ async function main() {
               file: local.read(),
             });
             if (decided.local) {
-              const record = localRecord({ action, context: contextOf(input, toolName), project: projectOf(projectDir), file: decided.file });
+              const record = localRecord({ action, context: contextOf(input, toolName), project: projectOf(projectDir), file: decided.file, taskId: setting(process.env, 'TASK_ID') ?? null });
               if (local.append(record, decided.file.snapshot)) {
                 fallback('allow');
                 await reporting;

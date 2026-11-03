@@ -15,7 +15,7 @@ import { ASK_HOLD_MS, createPauseMemory, createAimiruClient, installSource, sett
 import { CLAUDE_CODE_CONNECT } from '../vendor/messages.mjs';
 
 export const CONNECTOR = 'claude-code';
-export const VERSION = '0.3.0-rc.3';
+export const VERSION = '0.3.0-rc.4';
 /** onFailure: "block" makes a failed or timed-out check block the call (Claude Code 2.1.295, CHANGELOG). */
 export const MIN_ENFORCED_VERSION = '2.1.295';
 export const AGENT_LABEL = 'Claude Code';

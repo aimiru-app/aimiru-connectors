@@ -1,6 +1,12 @@
 # Changes to Aimiru for Claude Code
 
-## 0.3.0-rc.3 (pre-release, not released yet)
+## 0.3.0-rc.4 (pre-release, 3 Nov 2026)
+
+- Each read Aimiru allows on your computer inside a job you gave Claude Code now names that job in Aimiru, as every other checked step already did, so the job's record holds every step and Aimiru's closing check reads them all. Nothing about how a step is decided changes.
+- The runner's `on` waits for the runner that was already on to stop, tries the start again, and says plainly when it did not start.
+- What to do: `claude plugin marketplace update aimiru`, then `claude plugin update aimiru@aimiru`, and restart Claude Code. If the runner was on, run `node "<plugin>/scripts/runner.mjs" on` again.
+
+## 0.3.0-rc.3 (pre-release, 30 Oct 2026)
 
 - Aimiru's files now live in `~/.aimiru` when Claude Code gives the plugin no folder of its own, and the runner's copy is in `~/.aimiru/runner`. Settings are named `AIMIRU_...` (`AIMIRU_AGENT_TOKEN`, `AIMIRU_BASE_URL`, `AIMIRU_TAKE_TASKS` and the rest), and the address setting under `/plugin configure` is now `aimiru_url`. What to do: run the install lines again, or `claude plugin marketplace update aimiru` then `claude plugin update aimiru@aimiru`, and restart Claude Code. The key `/aimiru:connect` saved stays where it was and keeps working; an address you typed under `/plugin configure`, type again. If the runner was on, run `node "<plugin>/scripts/runner.mjs" on` again.
 - Aimiru's own tools are now named `mcp__plugin_aimiru_aimiru__<tool>`, and the routine is the skill `aimiru:aimiru`. A rule of yours that names one of Aimiru's tools by its full name, write again with the new name.

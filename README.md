@@ -38,7 +38,7 @@ Then start Claude Code, or restart it if it is open, and run `/aimiru:connect` i
 npx aimiru-codex init
 ```
 
-It opens Aimiru's page to connect it in your browser and shows a code and the same link, which you can open on your phone instead: pick the same code and tap Connect. Then open Codex, type `/hooks` and trust "Checking with Aimiru". Codex keeps its own sign-in; we suggest Sign in with ChatGPT, so Codex uses your own plan. Aimiru never asks for or holds your OpenAI key; the check talks to Aimiru with its own key only. Details in [`codex/README.md`](codex/README.md).
+It opens Aimiru's page to connect it in your browser and shows a code and the same link, which you can open on your phone instead: pick the same code and tap Connect. Then open Codex in your project. When it says checks need review, choose **trust all** only if every check it lists is Aimiru's (their commands name `.aimiru`); otherwise type `/hooks` and trust only Aimiru's. Codex keeps its own sign-in; we suggest Sign in with ChatGPT, so Codex uses your own plan. Aimiru never asks for or holds your OpenAI key; the check talks to Aimiru with its own key only. Details in [`codex/README.md`](codex/README.md).
 
 ### Try the pre-release
 

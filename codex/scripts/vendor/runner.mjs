@@ -66,6 +66,7 @@ export const RUNNER_WORDS = Object.freeze({
   onAgents: (labels) => (labels.length ? `It can start ${labels.join(' and ')} now.` : 'It cannot start an agent yet. Each one says why below.'),
   offHow: (line) => `Turn it off any time in Aimiru, or here with: ${line}`,
   stays: 'It stays on after a restart, and it keeps the computer awake only while a job runs and only on power.',
+  notStarted: (line) => `The runner did not start, so nothing will start your jobs yet. Try again in a few seconds with: ${line}`,
   noLaunchAgent: (line) => `This computer has no way to keep it on after a restart. Keep it running in a terminal with: ${line}`,
   off: 'Runner off. Nothing starts on this computer until you turn it on again.',
   offNothing: 'The runner was not on.',
@@ -1021,16 +1022,35 @@ function uidOf() {
   }
 }
 
-/** Writes the LaunchAgent and starts it (bootout first, then bootstrap). {written, started}. */
-export function installLaunchAgent({ env = process.env, plist, launchctl = defaultLaunchctl, platform = process.platform, userHome } = {}) {
+/** Blocks for ms (the install runs once, at a person's own `on`, so a short synchronous wait is fine). */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** How long `on` waits for launchd to let a running runner go, and how often it tries to start the new one. */
+export const LAUNCHD_GONE_WAIT_MS = 10_000;
+export const LAUNCHD_START_TRIES = 3;
+
+/**
+ * Writes the LaunchAgent and starts it. {written, started, launchd}. launchd lets a running runner go
+ * after bootout returns, not when it returns, and a bootstrap before then fails (2 Nov 2026: a second
+ * `on` left no runner): so it waits until launchd no longer lists the old one, then tries the start a
+ * few times. launchd is false where launchd is not used (another HOME, not a Mac): nothing to start.
+ */
+export function installLaunchAgent({ env = process.env, plist, launchctl = defaultLaunchctl, platform = process.platform, userHome, sleep = sleepSync } = {}) {
   const file = launchAgentFile(env);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, plist, { mode: 0o644 });
-  if (!realLaunchd(env, { platform, ...(userHome !== undefined ? { userHome } : {}) })) return { written: file, started: false };
+  if (!realLaunchd(env, { platform, ...(userHome !== undefined ? { userHome } : {}) })) return { written: file, started: false, launchd: false };
   const uid = uidOf();
-  launchctl(['bootout', `gui/${uid}/${LABEL}`]);
-  const r = launchctl(['bootstrap', `gui/${uid}`, file]);
-  return { written: file, started: r.ok };
+  const service = `gui/${uid}/${LABEL}`;
+  launchctl(['bootout', service]);
+  for (let waited = 0; waited < LAUNCHD_GONE_WAIT_MS && launchctl(['print', service])?.ok; waited += 200) sleep(200);
+  for (let i = 0; i < LAUNCHD_START_TRIES; i += 1) {
+    if (launchctl(['bootstrap', `gui/${uid}`, file])?.ok) return { written: file, started: true, launchd: true };
+    if (i < LAUNCHD_START_TRIES - 1) sleep(500 * (i + 1));
+  }
+  return { written: file, started: false, launchd: true };
 }
 
 /** Stops the LaunchAgent and removes its file. {removed}. */
@@ -1221,7 +1241,12 @@ export async function runnerMain(argv, o) {
         pathDirs: [node, claudeBin, codexBin].filter(Boolean).map((p) => path.dirname(p)),
         extraEnv,
       });
-      installLaunchAgent({ env, plist, launchctl: o.launchctl, platform, userHome: o.userHome });
+      const started = installLaunchAgent({ env, plist, launchctl: o.launchctl, platform, userHome: o.userHome, ...(o.sleep ? { sleep: o.sleep } : {}) });
+      // Never "stays on" over a runner launchd did not start: the person would wait for nothing.
+      if (started.launchd && !started.started) {
+        print(RUNNER_WORDS.notStarted(line('on')));
+        return 1;
+      }
       print(RUNNER_WORDS.stays);
     } else {
       print(RUNNER_WORDS.noLaunchAgent(line('run')));
