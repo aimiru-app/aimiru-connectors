@@ -461,6 +461,20 @@ async function main() {
           else delete action.counterparty;
         }
         const failClosed = isFailClosed(action.class, { sensitive: action.sensitive === true });
+        /**
+         * Links this step to its record after it runs (ADR-0174): what Aimiru answered, which
+         * post-tool-use.mjs confirms once Codex says how the step ended, as Aimiru for Claude Code
+         * does. The programs it runs by file and fingerprint, never their text. Bookkeeping only: a
+         * full or read-only disk never changes the answer.
+         */
+        const rememberCall = (extra) => {
+          try {
+            const programs = Array.isArray(action.programs) ? action.programs.map((p) => ({ rel: p.rel, sha256: p.sha256 ?? null })) : null;
+            store.putCall(input.tool_use_id, { class: action.class, description: action.description, ...(programs ? { programs } : {}), ...extra });
+          } catch {
+            // the record after the step is sent without the link
+          }
+        };
         const fp = fingerprint(input);
         let pending = store.getPending(fp);
         // A question about other programs than the ones this call runs now (a file swapped since) is not
@@ -485,6 +499,7 @@ async function main() {
             if (decided.local) {
               const record = localRecord({ action, context: contextOf(input, toolName), project: projectOf(projectDir), file: decided.file, taskId: setting(process.env, 'TASK_ID') ?? null });
               if (local.append(record, decided.file.snapshot)) {
+                rememberCall({ local: true });
                 fallback('allow');
                 await reporting;
                 return 'done'; // no output: Codex goes ahead, and its own approval rules still apply
@@ -504,6 +519,9 @@ async function main() {
           // On disk before anything goes to the network: if this process is stopped now, the harmless
           // call the guard lets through is still recorded (the spool picks the copy up later).
           if (!ticket && client.spool) ticket = client.spool.begin({ kind: 'record', body: uncheckedRecord(input, action, projectDir, 'stopped') });
+          // The record after the step knows it may run without Aimiru's answer (ADR-0174); Aimiru's
+          // answer below replaces this.
+          rememberCall({ unchecked: true });
           fallback('allow');
         };
         goAheadIfStopped();
@@ -532,7 +550,7 @@ async function main() {
         // question. It also tells Aimiru this check is not waiting on it (waiting_s=0).
         if (pending?.exceptionId) {
           holdFromHere();
-          const answer = await client.approvalNow(pending.exceptionId, { timeoutMs: Math.max(250, Math.min(RETRY_LOOK_MS, left() - PAUSE_RESERVE_MS)) });
+          const answer = await client.approvalNow(pending.exceptionId, { timeoutMs: Math.max(250, Math.min(RETRY_LOOK_MS, left() - PAUSE_RESERVE_MS)), relayWhy: true });
           if (answer.status === 'allowed' && yesBeforeLastPause(watch, answer.answeredAt)) {
             // A yes given before a Pause is never used after it (ADR-0035, ADR-0142): asked again below.
             store.deletePending(fp);
@@ -555,6 +573,7 @@ async function main() {
             }
             store.deletePending(fp);
             rememberYes();
+            rememberCall({ actionId: pending.actionId ?? null, unchecked: false });
             // A later yes let the step through: minutes from the ask to the step running (ADR-0145).
             traceAsk({ kind: 'ran', exception_id: pending.exceptionId, asked_at: Number.isFinite(pending.ts) ? new Date(pending.ts).toISOString() : null });
             return 'done'; // the person said yes: no output, Codex goes ahead
@@ -569,7 +588,18 @@ async function main() {
             return 'done';
           } else if (answer.status === 'waiting') {
             // Still open: refused again, and nothing is asked a second time.
-            deny(MESSAGES.askStillOpen(clockOf(pending.expiresAt ?? null), AGENT_LABEL));
+            // The person asked why (ADR-0201): Aimiru's fixed question goes with the refusal, until answered.
+            // Codex can never mark it answered (it answers in Codex), so it is told once per ask.
+            const why = answer.whyAsked && !answer.whyAsked.answered && !pending.whyRelayed ? ` ${MESSAGES.whyAsked(pending.exceptionId, { tool: false })}` : '';
+            if (why) {
+              const { mac: _mac, ts: _ts, ...kept } = pending;
+              try {
+                store.putPending(fp, { ...kept, whyRelayed: true });
+              } catch {
+                // told again next time, which costs a repeat, not safety
+              }
+            }
+            deny(`${MESSAGES.askStillOpen(clockOf(pending.expiresAt ?? null), AGENT_LABEL)}${why}`);
             return 'done';
           } else {
             store.deletePending(fp); // expired: ask again below
@@ -585,6 +615,7 @@ async function main() {
           } catch {
             // the in-flight copy stays and is picked up later
           }
+          rememberCall({ unchecked: true });
           return 'done';
         }
 
@@ -606,6 +637,7 @@ async function main() {
         else if (d.reason === 'aimiru') store.markUp();
 
         if (d.decision === 'allow') {
+          rememberCall({ actionId: d.failOpen ? null : (d.actionId ?? null), unchecked: Boolean(d.failOpen) });
           if (d.failOpen) {
             try {
               client.spool?.append({ kind: 'record', body: uncheckedRecord(input, action, projectDir, 'unreachable') });
@@ -649,6 +681,7 @@ async function main() {
         }
         if (answer.status === 'allowed') {
           rememberYes();
+          rememberCall({ actionId: d.actionId ?? null, unchecked: false });
           return 'done'; // the person said yes
         }
         /** The question stays open with the person (ADR-0145), kept so the same call looks at it again. */
@@ -684,6 +717,11 @@ async function main() {
           try {
             if (!client.pausedLocally()) {
               client.spool?.append({ kind: 'record', body: uncheckedRecord(input, action, projectDir, 'unreachable') });
+              try {
+                store.putCall(input.tool_use_id, { class: action.class, description: action.description, unchecked: true });
+              } catch {
+                // the record after the step is sent without the link
+              }
               return 'done';
             }
           } catch {

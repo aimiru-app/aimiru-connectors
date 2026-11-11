@@ -52,6 +52,36 @@ function note(id, text) {
   results.push({ id, ok: true, note: true, text });
 }
 
+/** Whether this copy of the plugin starts the brief for a subagent (hooks/hooks.json, SubagentStart). */
+function pluginGivesSubagentBrief() {
+  try {
+    const hooks = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'));
+    return (hooks?.hooks?.SubagentStart ?? []).some((g) => (g?.hooks ?? []).some((h) => Array.isArray(h?.args) && String(h.args.at(-1)).endsWith('/subagent-start.mjs')));
+  } catch {
+    return false;
+  }
+}
+
+/** Why a subagent's brief was not given, by what the last subagent's start kept (subagent-start.mjs). */
+const NO_SUBAGENT_BRIEF_BECAUSE = {
+  empty: 'Aimiru has none to give yet',
+  closed: 'your brief is not open to Claude Code in Aimiru',
+  no_room: 'it would not fit',
+};
+
+/** What the doctor says about the brief for subagents: given by this copy of the plugin, and when it last ran. */
+function subagentBriefLine({ given, last, reinstall }) {
+  if (!given) return `This copy of the plugin does not give subagents your brief. ${reinstall}`;
+  // The kept file is only ever printed through fixed words: a time that does not read as one, or a
+  // state this copy does not know, never reaches the doctor's output (security hat, 11 Nov 2026).
+  const at = last ? Date.parse(last.ranAt) : Number.NaN;
+  if (!Number.isFinite(at)) return `Subagents Claude Code starts get your brief too. Aimiru has not seen one start on this computer yet.`;
+  const when = new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  if (last.state === 'given') return `Aimiru gave the last subagent Claude Code started, at ${when}, your brief.`;
+  const why = Object.hasOwn(NO_SUBAGENT_BRIEF_BECAUSE, last.state) ? NO_SUBAGENT_BRIEF_BECAUSE[last.state] : 'Aimiru did not answer in time, or you were paused';
+  return `The last subagent Claude Code started, at ${when}, got no brief, because ${why}.`;
+}
+
 async function main() {
   // The data folder first: the key /aimiru:connect saved lives there (ADR-0034).
   // Claude Code sets CLAUDE_PLUGIN_DATA only for its own runs: find the folder the hooks use.
@@ -168,6 +198,10 @@ async function main() {
   else note('jobs', MESSAGES.jobsOn(AGENT_LABEL));
   // A brief the start missed and the person's message brought (CC6) says so.
   if (last?.brief?.state === 'given') note('brief', last.brief.at_prompt === true ? MESSAGES.briefGivenAtPrompt(AGENT_LABEL) : MESSAGES.briefGiven(AGENT_LABEL));
+
+  // 7b2. The brief for subagents (P2.9): whether this copy of the plugin gives it, and when a subagent
+  // last started here and what came of its brief. Never the brief's words.
+  note('subagent_brief', subagentBriefLine({ given: pluginGivesSubagentBrief(), last: store.subagentBrief(), reinstall }));
 
   // 7c. Another connector on this computer still on an earlier Aimiru (ADR-0164): until it is
   // updated, its files and Claude Code's are not guarded from each other.

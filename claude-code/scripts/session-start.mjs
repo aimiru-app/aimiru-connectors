@@ -16,6 +16,7 @@
 // prompt asks once more and gives it then (CC6), so a cold server never costs a session its brief.
 // A brief that would push the context over Claude Code's 10,000 characters (with a job, or a late
 // yes) is left out whole, and the next prompt gives it when there is room (quality review).
+// A subagent Claude starts gets the same brief, alone, as it starts (subagent-start.mjs, SubagentStart).
 //
 // The person's job (ADR-0157, which follows ADR-0043 and ADR-0145): a new, resumed or cleared
 // session the person starts in their own terminal takes the job they gave Claude Code in Aimiru
@@ -52,6 +53,7 @@ import {
   AGENT_LABEL,
   PAUSE_HOLDS,
   VERSION,
+  askForBrief,
   briefMissed,
   detectClaudeCodeVersion,
   isInteractive,
@@ -85,9 +87,6 @@ const LATE_MAX = 3;
 
 /** The whole run stays inside hooks.json's 10 seconds. */
 const BUDGET_MS = 9_000;
-
-/** The most the person's brief may take (ADR-0157): asked beside the heartbeat, which takes up to 4 s. */
-const BRIEF_MS = 2_000;
 
 function cap(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -171,7 +170,8 @@ async function main() {
     refreshSnapshot(client, local, store, input.session_id, { timeoutMs: 3_000 }).catch(() => null),
     flushLocal(client, local, { budgetMs: 2_000, force: true }).catch(() => null),
     lateIds.length ? client.lateAnswers({ project: projectOf(projectDir), exceptionIds: lateIds }, { timeoutMs: 3_000 }).catch(() => null) : Promise.resolve(null),
-    client.brief({ timeoutMs: BRIEF_MS }).catch(() => null),
+    // At most BRIEF_START_MS (ADR-0157), the same ask a subagent makes (subagent-start.mjs).
+    askForBrief(client),
   ]);
   const lateOffers = lateYesOffers(late, store);
   // What Aimiru gave of the person's brief (kept below, once it is known to fit the context).

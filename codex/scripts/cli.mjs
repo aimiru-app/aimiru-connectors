@@ -62,7 +62,7 @@ import {
   ranSinceInstall,
   stateStore,
 } from './lib/runtime.mjs';
-import { appDirOf, codexSettingsFacts, commandPaths, copyApp, earlierDataDir, entryTrust, findOurBrief, findOurHook, hookKeyOf, installHook, isOurExactBrief, isOurExactCheck, removeEarlierCopy, stableNodePath, uninstallHook } from './lib/install.mjs';
+import { allWaiting, appDirOf, codexSettingsFacts, commandPaths, copyApp, earlierDataDir, entriesTrust, entryTrust, findOurBrief, findOurHook, hookKeyOf, installHook, isOurExactBrief, isOurExactCheck, removeEarlierCopy, stableNodePath, uninstallHook, waitingForTrust } from './lib/install.mjs';
 import { earlierInstalls } from './vendor/runner.mjs';
 import { remember, REMEMBER_TOPICS } from './lib/remember.mjs';
 import { importLines, offerImport } from './lib/import.mjs';
@@ -110,9 +110,9 @@ Usage:
   ${PACKAGE_NAME} import               bring in what your AGENTS.md files say about you, as you choose
       --send [--leave-out 2 5]         send the lines shown, or all but those numbers
       --none                           send none, and forget the lines shown
-  ${PACKAGE_NAME} uninstall            take Aimiru's check and brief out of Codex
+  ${PACKAGE_NAME} uninstall            take Aimiru's check, brief and record out of Codex
 
-After init, one step in Codex, for Aimiru's check and its brief:
+After init, one step in Codex, for Aimiru's check, brief and record:
 ${WORDS.trustHow('/hooks')}`;
 
 /** Flags that take no value: the word after one is never read as its value. */
@@ -380,13 +380,41 @@ export async function init(o = {}) {
   // Asked once (ADR-0162): bring in what Codex already knows about the person.
   if (key) await offerImport({ env, print, ...(o.importAsk ? { ask: o.importAsk } : {}), ...(o.projectDir ? { projectDir: o.projectDir } : {}) });
 
+  // One visit to /hooks (ADR-0174), naming each of Aimiru's entries Codex does not trust yet, read
+  // from Codex's own files: all of them on a first install, only the new or changed ones on an update.
   print('');
-  print(WORDS.trustTitle);
-  print(WORDS.trustStep('/hooks'));
+  const waiting = trustVisitOf({ codexHome, appDir });
+  if (waiting.length) {
+    print(WORDS.trustTitle);
+    for (const line of WORDS.trustVisit('/hooks', waiting, { checkWaiting: waiting.some((x) => x.entry.name === 'check') })) print(line);
+  } else {
+    print(WORDS.allTrusted);
+  }
   print(JOB_WORDS.trustBrief('/hooks'));
+  print(WORDS.trustRecord);
   print(WORDS.trustThen);
   print(WORDS.limit);
   return failed || !key ? 1 : 0;
+}
+
+/**
+ * The entries the one visit to /hooks names (ADR-0174), from Codex's own files: every one of
+ * Aimiru's entries Codex would skip now. Anything that cannot be read names them all, never none.
+ */
+export function trustVisitOf({ codexHome, appDir }) {
+  try {
+    return waitingForTrust(entriesTrust({ codexHome, appDir }));
+  } catch {
+    return allWaiting();
+  }
+}
+
+/** The state of a group of entries for the doctor: the one that needs the most. */
+function worstOf(list) {
+  for (const state of ['missing', 'changed']) if (list.some((x) => x.state === state)) return state;
+  if (list.some((x) => x.off)) return 'off';
+  for (const state of ['unknown', 'untrusted']) if (list.some((x) => x.state === state)) return state;
+  return 'trusted';
 }
 
 /** What doctor finds, as {check, ok, text}; read-only except one GET /v1/me. */
@@ -435,10 +463,11 @@ export async function doctor(o = {}) {
     // Whether Codex trusts the check where it is now, from Codex's own files (ADR-0157).
     // Only the entry exactly as install writes it counts (security review); anything unreadable is not trusted.
     const trust = entryTrust({ codexHome: settings.codexHome, at: hook, event: 'PreToolUse' });
-    if (!isOurExactCheck(hook, appDir)) add('check_trusted', false, JOB_WORDS.checkChanged('/hooks'));
+    // The way to trust it is said once, at the end, with every other entry not trusted yet (ADR-0174).
+    if (!isOurExactCheck(hook, appDir)) add('check_trusted', false, JOB_WORDS.checkChangedShort);
     else if (trust.state === 'trusted') add('check_trusted', true, JOB_WORDS.checkTrusted);
-    else if (trust.state === 'untrusted') add('check_trusted', false, JOB_WORDS.checkUntrusted('/hooks'));
-    else if (trust.state === 'changed') add('check_trusted', false, JOB_WORDS.checkChanged('/hooks'));
+    else if (trust.state === 'untrusted') add('check_trusted', false, JOB_WORDS.checkUntrusted());
+    else if (trust.state === 'changed') add('check_trusted', false, JOB_WORDS.checkChangedShort);
     else add('check_trusted', false, JOB_WORDS.trustUnknown);
   }
   add('ran', ran, WORDS.doctorRan(ran));
@@ -446,12 +475,27 @@ export async function doctor(o = {}) {
   const brief = findOurBrief({ codexHome: settings.codexHome, appDir });
   const briefTrust = entryTrust({ codexHome: settings.codexHome, at: brief, event: 'SessionStart' });
   if (!brief.present) add('brief', false, JOB_WORDS.briefMissing);
-  else if (!isOurExactBrief(brief, appDir)) add('brief', false, JOB_WORDS.briefChanged('/hooks'));
+  else if (!isOurExactBrief(brief, appDir)) add('brief', false, JOB_WORDS.briefChanged());
   else if (briefTrust.off) add('brief', false, JOB_WORDS.briefOff);
   else if (briefTrust.state === 'trusted') add('brief', true, JOB_WORDS.briefTrusted);
-  else if (briefTrust.state === 'changed') add('brief', false, JOB_WORDS.briefChanged('/hooks'));
+  else if (briefTrust.state === 'changed') add('brief', false, JOB_WORDS.briefChanged());
   else if (briefTrust.state === 'unknown') add('brief', false, JOB_WORDS.trustUnknown);
-  else add('brief', false, JOB_WORDS.briefUntrusted('/hooks'));
+  else add('brief', false, JOB_WORDS.briefUntrusted());
+  // The brief as a subagent starts, and the record of how each step ended (ADR-0174), from Codex's own files.
+  let all = [];
+  try {
+    all = entriesTrust({ codexHome: settings.codexHome, appDir });
+  } catch {
+    all = [];
+  }
+  const said = {
+    subagent_brief: { missing: JOB_WORDS.subagentBriefMissing, changed: JOB_WORDS.subagentBriefChanged, off: JOB_WORDS.subagentBriefOff('/hooks'), unknown: JOB_WORDS.trustUnknown, untrusted: JOB_WORDS.subagentBriefUntrusted, trusted: JOB_WORDS.subagentBriefTrusted },
+    record: { missing: JOB_WORDS.recordMissing, changed: JOB_WORDS.recordChanged, off: JOB_WORDS.recordOff('/hooks'), unknown: JOB_WORDS.trustUnknown, untrusted: JOB_WORDS.recordUntrusted, trusted: JOB_WORDS.recordTrusted },
+  };
+  for (const g of ['subagent_brief', 'record']) {
+    const state = worstOf(all.filter((x) => x.entry.group === g));
+    add(g, state === 'trusted', said[g][state]);
+  }
   // How an ask holds a step (ADR-0145), as Claude Code's doctor says it.
   add('ask_hold', true, MESSAGES.waitHold);
   // Another connector here still on an earlier Aimiru (ADR-0164): until it is updated, its files
@@ -460,7 +504,13 @@ export async function doctor(o = {}) {
   if (o.json) print(JSON.stringify({ connector: CONNECTOR, version: VERSION, checks: checks.map(({ check, ok }) => ({ check, ok })), tier: status.tier ?? null }, null, 2));
   else for (const c of checks) print(`${c.ok ? 'ok  ' : 'fix '} ${c.text}`);
   const moved = checks.some((c) => c.check === 'position' && !c.ok);
-  if ((!ran || moved) && !o.json) print(WORDS.trustStep('/hooks'));
+  // One visit to /hooks naming every entry Codex does not trust yet (ADR-0174); with all trusted but
+  // the check not yet run, or moved, the step as before.
+  const waiting = waitingForTrust(all);
+  if (!o.json) {
+    if (waiting.length) for (const line of WORDS.trustVisit('/hooks', waiting, { checkWaiting: waiting.some((x) => x.entry.name === 'check') })) print(line);
+    else if (!ran || moved) print(WORDS.trustStep('/hooks'));
+  }
   return checks.every((c) => c.ok) ? 0 : 1;
 }
 

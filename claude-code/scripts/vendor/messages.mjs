@@ -231,6 +231,17 @@ export const MESSAGES = Object.freeze({
   askStillOpen: (until = null, agent = null) => `The person has not answered yet, so this step did not run.${openUntil(until)} ${CARRY_ON} ${moveOnExit(agent)}`,
 
   /**
+   * Ask why, both ways (ADR-0201): the person asked the agent why it wants this step. Said on the
+   * retry that found the question, after askStillOpen. Aimiru's own fixed sentence, never the
+   * person's words, and never a yes. `tool`: the agent has Aimiru's answer_why tool (Claude Code);
+   * without it (Codex) the agent answers the person where they work with it.
+   */
+  whyAsked: (exceptionId, { tool = true } = {}) =>
+    tool
+      ? `The person asked why you want to take this step. Answer them once with Aimiru's answer_why tool (exception_id ${exceptionId}), in one or two plain sentences of at most 280 characters, with no links. Your answer is shown as yours. The step still waits for their answer: this question is not a yes, and not a reason to try another way.`
+      : 'The person asked why you want to take this step. Tell them in your reply here, in one or two plain sentences. The step still waits for their answer: this question is not a yes, and not a reason to try another way.',
+
+  /**
    * Claude asked Aimiru's own check or request_approval tool while the plugin checks every step
    * itself (ADR-0096): the person would be asked twice, so the tool call is refused, for the model.
    */

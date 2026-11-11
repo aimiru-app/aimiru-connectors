@@ -10,7 +10,7 @@ import { createPauseWatch } from '../vendor/pause-watch.mjs';
 import { ASK_HOLD_MS, createAimiruClient, setting, sha256Hex } from '../vendor/aimiru-client.mjs';
 
 export const CONNECTOR = 'codex';
-export const VERSION = '0.3.0-rc.4';
+export const VERSION = '0.3.0-rc.5';
 /** The npm package (ADR-0091): unscoped, a command people run with npx, like aimiru-mcp-proxy. */
 export const PACKAGE_NAME = 'aimiru-codex';
 /** The line that removes the check (wave 10, shapes 3), word for word as the demo page and the README show it. */
@@ -542,6 +542,15 @@ function pendingMac(secret, fp, data) {
   return createHmac('sha256', `aimiru-pending:${secret}`).update(`${fp}\n${data.exceptionId ?? ''}\n${data.actionId ?? ''}${words}${call}${programs}`).digest('hex');
 }
 
+/**
+ * A MAC over a step's link to its later record (putCall), keyed by the Aimiru key like pendingMac
+ * (security review of ADR-0174): a link file written by anything else, or copied to another step,
+ * does not verify, so a receipt never confirms an action this check did not answer for that step.
+ */
+function callMac(secret, toolUseId, data) {
+  return createHmac('sha256', `aimiru-call:${secret}`).update(`${String(toolUseId)}\n${JSON.stringify(data)}`).digest('hex');
+}
+
 function macEqual(a, b) {
   const x = Buffer.from(String(a ?? ''), 'utf8');
   const y = Buffer.from(String(b ?? ''), 'utf8');
@@ -550,6 +559,9 @@ function macEqual(a, b) {
 
 export function stateStore(dataDir, { secret = '' } = {}) {
   const pendingDir = path.join(dataDir, 'pending');
+  // Each step the check let through, by Codex's tool_use_id (ADR-0174): what Aimiru answered, so the
+  // record after the step (post-tool-use.mjs) confirms that action, as Aimiru for Claude Code does.
+  const callsDir = path.join(dataDir, 'calls');
   const healthFile = path.join(dataDir, 'health.json');
   const statusFile = path.join(dataDir, 'status.json');
 
@@ -611,20 +623,45 @@ export function stateStore(dataDir, { secret = '' } = {}) {
         // a read-only disk keeps nothing; the next check reports again
       }
     },
-    /** Removes waiting questions older than maxAgeMs. */
-    cleanup(maxAgeMs = 24 * 3600_000) {
-      let names = [];
+    /**
+     * Links a step the check let through to its later record (ADR-0174), by Codex's tool_use_id:
+     * {class, description, actionId?, local?, unchecked?, programs?}. Never the step's input.
+     */
+    putCall(toolUseId, data) {
+      if (!toolUseId || !secret) return; // without a key there is nothing to sign it with
+      const body = { ...data, ts: Date.now() };
+      writeJsonFile(path.join(callsDir, `${safeName(toolUseId)}.json`), { ...body, mac: callMac(secret, toolUseId, body) });
+    },
+    /** The link putCall kept for this step, taken (read once and removed), or null; null when its MAC does not verify. */
+    takeCall(toolUseId) {
+      if (!toolUseId) return null;
+      const f = path.join(callsDir, `${safeName(toolUseId)}.json`);
+      const v = readJsonFile(f);
       try {
-        names = fs.readdirSync(pendingDir);
+        fs.rmSync(f, { force: true });
       } catch {
-        return;
+        // ignore
       }
-      for (const n of names) {
-        const f = path.join(pendingDir, n);
+      if (!v || typeof v !== 'object' || !secret) return null;
+      const { mac, ...body } = v;
+      return macEqual(mac, callMac(secret, toolUseId, body)) ? body : null;
+    },
+    /** Removes waiting questions and step links older than maxAgeMs. */
+    cleanup(maxAgeMs = 24 * 3600_000) {
+      for (const dir of [pendingDir, callsDir]) {
+        let names = [];
         try {
-          if (Date.now() - fs.statSync(f).mtimeMs > maxAgeMs) fs.rmSync(f, { force: true });
+          names = fs.readdirSync(dir);
         } catch {
-          // ignore
+          continue;
+        }
+        for (const n of names) {
+          const f = path.join(dir, n);
+          try {
+            if (Date.now() - fs.statSync(f).mtimeMs > maxAgeMs) fs.rmSync(f, { force: true });
+          } catch {
+            // ignore
+          }
         }
       }
     },

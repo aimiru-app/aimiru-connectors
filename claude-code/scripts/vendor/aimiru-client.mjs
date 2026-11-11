@@ -1243,11 +1243,14 @@ export function createAimiruClient(opts = {}) {
    * keeps waiting, in whole seconds (0 to 600), so the person sees how long the agent waits for
    * them and when it stopped (ADR-0094). An older Aimiru ignores it.
    */
-  function approvalsWait(exceptionId, waitSeconds = 25, { timeoutMs, waitingS } = {}) {
+  function approvalsWait(exceptionId, waitSeconds = 25, { timeoutMs, waitingS, relayWhy = false } = {}) {
     const wait = Math.max(0, Math.min(25, Math.floor(waitSeconds)));
     const t = timeoutMs ?? wait * 1000 + timeouts.longPollSlackMs;
     const waiting = waitingS === undefined || waitingS === null ? '' : `&waiting_s=${waitingSecondsOf(Number(waitingS) * 1000)}`;
-    return request('GET', `/v1/approvals/${encodeURIComponent(exceptionId)}?wait=${wait}${waiting}`, { timeoutMs: t });
+    // relay_why=1 (ADR-0201): this read passes the person's "why?" on to the agent, so Aimiru marks
+    // it seen. An older Aimiru ignores it.
+    const relay = relayWhy ? '&relay_why=1' : '';
+    return request('GET', `/v1/approvals/${encodeURIComponent(exceptionId)}?wait=${wait}${waiting}${relay}`, { timeoutMs: t });
   }
 
 
@@ -1640,7 +1643,11 @@ export function createAimiruClient(opts = {}) {
       if (d.status === 'allowed' || (d.status == null && d.decision === 'allow')) {
         return { status: 'allowed', explain: d.explain ?? null, reason: 'aimiru', answeredAt: typeof d.answered_at === 'string' ? d.answered_at : null };
       }
-      return { status: 'waiting', explain: d.explain ?? null, reason: 'waiting' };
+      // The person asked the agent why (ADR-0201): only Aimiru's own fixed sentence comes back, never
+      // the person's words, and only whether the agent answered already.
+      const q = d.why_question && typeof d.why_question === 'object' ? d.why_question : null;
+      const whyAsked = q ? { answered: q.answered === true } : null;
+      return { status: 'waiting', explain: d.explain ?? null, reason: 'waiting', whyAsked };
     }
     const aimiru = r.kind === 'http' && r.fromAimiru !== false;
     if (aimiru && r.status === 423) {
@@ -1659,8 +1666,8 @@ export function createAimiruClient(opts = {}) {
    * also tells Aimiru this connector is not waiting (quiet hours), so the person sees at once that
    * the agent stopped. Resolves like waitForApproval; trouble on the way reads as still waiting.
    */
-  async function approvalNow(exceptionId, { timeoutMs = 3_000, waitingS = 0 } = {}) {
-    const r = await approvalsWait(exceptionId, 0, { timeoutMs, waitingS });
+  async function approvalNow(exceptionId, { timeoutMs = 3_000, waitingS = 0, relayWhy = false } = {}) {
+    const r = await approvalsWait(exceptionId, 0, { timeoutMs, waitingS, relayWhy });
     return approvalAnswerOf(r) ?? { status: 'waiting', explain: null, reason: 'timeout' };
   }
 

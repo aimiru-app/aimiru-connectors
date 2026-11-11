@@ -203,14 +203,66 @@ function macAliases(dir) {
  */
 export function isInsideWorkArea(p, ctx) {
   if (!p) return false;
-  if (isWithin(p, ctx.project)) return true;
-  const temps = ctx.temps.filter((t) => p !== t && isWithin(p, t));
+  if (!withinWorkArea(p, ctx, (x) => x)) return false;
+  // A link inside the project can lead out of it (or into the maker's settings): the folder it really
+  // is, resolved from the deepest part that exists, must be inside the real project or temp folder.
+  const real = realLanding(p);
+  if (real === null) return false;
+  if (real === p) return true;
+  return withinWorkArea(real, ctx, (x) => realLanding(x) ?? x);
+}
+
+function withinWorkArea(p, ctx, map) {
+  if (isWithin(p, map(ctx.project))) return true;
+  const temps = ctx.temps.map(map).filter((t) => p !== t && isWithin(p, t));
   if (!temps.length) return false;
-  const homes = Array.isArray(ctx.homes) ? ctx.homes : ctx.home ? [path.resolve(ctx.home)] : [];
+  const homes = (Array.isArray(ctx.homes) ? ctx.homes : ctx.home ? [path.resolve(ctx.home)] : []).map(map);
   const home = homes.find((h) => isWithin(p, h));
   // Inside the home folder, and the home folder is inside (or is) every temp folder p is in.
   if (home && temps.every((t) => isWithin(home, t))) return false;
   return true;
+}
+
+/**
+ * Where a path really is: its deepest part that exists is resolved through every link (realpath), and
+ * the rest follows it. A link to a place that is not there lands where it points (so a dangling link
+ * to the maker's settings is those settings). Anything that cannot be resolved is null, which
+ * every caller reads as outside the project (a link in the project to the maker's settings must not
+ * make a save there look like local work).
+ */
+export function realLanding(p) {
+  if (!p) return null;
+  let cur = path.resolve(p);
+  const tail = [];
+  for (let hops = 0; hops < 80; hops += 1) {
+    try {
+      return tail.length ? path.join(fs.realpathSync(cur), ...tail.reverse()) : fs.realpathSync(cur);
+    } catch (err) {
+      if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') return null;
+      let link = null;
+      try {
+        link = fs.readlinkSync(cur); // a link to a place that is not there: where it points is where it lands
+      } catch {
+        link = null;
+      }
+      if (link !== null) {
+        cur = path.resolve(path.dirname(cur), link);
+        continue;
+      }
+      const parent = path.dirname(cur);
+      if (parent === cur) return null;
+      tail.push(path.basename(cur));
+      cur = parent;
+    }
+  }
+  return null;
+}
+
+/** The path as written and, when a link makes it somewhere else, where it really is. */
+function pathForms(p) {
+  if (!p) return [];
+  const real = realLanding(p);
+  return real && real !== p ? [p, real] : [p];
 }
 
 /**
@@ -232,19 +284,27 @@ export function isInsideWorkArea(p, ctx) {
  */
 export function isProtectedPath(p, ctx) {
   if (!p) return false;
+  if (protectedByName(p, ctx)) return true;
+  const real = realLanding(p);
+  return real !== null && real !== p && protectedByName(real, ctx);
+}
+
+function protectedByName(p, ctx) {
+  if (!p) return false;
   const norm = p.replace(/\\/g, '/');
-  if (/\/\.claude\/settings(\.local)?\.json$/.test(norm)) return true;
-  if (/managed-settings(\.json|\.d(\/|$))/.test(norm)) return true;
-  if (/\/\.claude\/plugins(\/|$)/.test(norm)) return true;
-  if (/\/\.claude\.json$/.test(norm)) return true;
-  if (/\/\.codex\/([^/]+\.)?config\.toml$/.test(norm) || /\/\.codex\/(hooks\.json|requirements\.toml)$/.test(norm)) return true;
-  if (/\/\.codex\/rules(\/|$)/.test(norm)) return true;
-  if (ctx?.project && isWithin(p, path.join(ctx.project, '.codex'))) return true;
-  if (/\/plugins\/data\/aimiru-[^/]*(\/|$)/.test(norm)) return true;
-  if (/\/\.aimiru\//.test(norm) || /\/\.aimiru$/.test(norm)) return true;
+  // A Mac's disk ignores case (".CLAUDE" is ".claude"): every name below is matched without it.
+  if (/\/\.claude\/settings(\.local)?\.json$/i.test(norm)) return true;
+  if (/managed-settings(\.json|\.d(\/|$))/i.test(norm)) return true;
+  if (/\/\.claude\/plugins(\/|$)/i.test(norm)) return true;
+  if (/\/\.claude\.json$/i.test(norm)) return true;
+  if (/\/\.codex\/([^/]+\.)?config\.toml$/i.test(norm) || /\/\.codex\/(hooks\.json|requirements\.toml)$/i.test(norm)) return true;
+  if (/\/\.codex\/rules(\/|$)/i.test(norm)) return true;
+  if (ctx?.project && isWithin(p.toLowerCase(), path.join(ctx.project, '.codex').toLowerCase())) return true;
+  if (/\/plugins\/data\/aimiru-[^/]*(\/|$)/i.test(norm)) return true;
+  if (/\/\.aimiru\//i.test(norm) || /\/\.aimiru$/i.test(norm)) return true;
   if (RUNNER_PLIST_RE.test(norm)) return true;
   if (isCopyFolderShape(norm, ctx)) return true;
-  return (ctx?.protectedPaths || []).some((pp) => pp && isWithin(p, path.resolve(pp)));
+  return (ctx?.protectedPaths || []).some((pp) => pp && [path.resolve(pp), realLanding(path.resolve(pp))].some((q) => q && isWithin(p.toLowerCase(), q.toLowerCase())));
 }
 
 /**
@@ -4190,6 +4250,65 @@ function withBracesExpanded(args, argDyn, argExp, argSub = []) {
   return { args: outArgs, argDyn: outDyn, argSub: outSub };
 }
 
+/**
+ * The folders core.hooksPath names in the project's git settings and the person's own (relative ones
+ * count from the project). A file in one of them under a hook's name is a git guard, as one in
+ * .git/hooks is.
+ */
+// Known limits, for the hardening list: husky's indirect script (a hook that only runs a tracked file),
+// links from .git/hooks to tracked scripts, pre-commit.legacy and other renamed hooks git does not run,
+// and Artifact addresses written without a scheme.
+const HOOKS_DIRS_CACHE = new WeakMap();
+function configuredHooksDirs(ctx) {
+  const kept = HOOKS_DIRS_CACHE.get(ctx);
+  if (kept) return kept;
+  const dirs = [];
+  const homes = (Array.isArray(ctx.homes) ? ctx.homes : ctx.home ? [ctx.home] : []).filter(Boolean);
+  const dotGit = path.join(ctx.project || '', '.git');
+  const files = [];
+  const gitText = plainFileText(dotGit); // a linked worktree's .git is a file: "gitdir: <path>"
+  const pointer = gitText ? /^gitdir:\s*(.+?)\s*$/m.exec(gitText) : null;
+  if (pointer) {
+    // The worktree's own settings, then the common git folder's (commondir), where the shared ones live.
+    const gitDir = path.resolve(ctx.project, pointer[1]);
+    files.push(path.join(gitDir, 'config.worktree'), path.join(gitDir, 'config'));
+    const common = plainFileText(path.join(gitDir, 'commondir'));
+    if (common && common.trim()) files.push(path.join(path.resolve(gitDir, common.trim()), 'config'), path.join(path.resolve(gitDir, common.trim()), 'config.worktree'));
+  } else files.push(path.join(dotGit, 'config'), path.join(dotGit, 'config.worktree'));
+  files.push(...homes.flatMap((h) => [path.join(h, '.gitconfig'), path.join(h, '.config', 'git', 'config')]));
+  for (const f of files) {
+    const text = plainFileText(f);
+    if (!text) continue;
+    for (const m of text.matchAll(/^\s*hooksPath\s*=\s*"?([^"\r\n]+?)"?\s*$/gim)) {
+      const v = m[1].trim().replace(/^~(?=$|\/)/, ctx.home || os.homedir());
+      if (v) dirs.push(path.resolve(ctx.project || '.', v));
+    }
+  }
+  HOOKS_DIRS_CACHE.set(ctx, dirs);
+  return dirs;
+}
+
+/**
+ * A git guard or the folder that holds the guards (.git/hooks, or the folder core.hooksPath names): the
+ * one check every shell writer uses, so a guard counts the same wherever git takes its guards from.
+ */
+function isGuardPlace(p, ctx) {
+  if (!p) return false;
+  if (isGuardFile(p, ctx) || pathForms(p).some(isGitGuardPath)) return true;
+  const dirs = configuredHooksDirs(ctx);
+  return pathForms(p).some((f) => dirs.some((d) => [d, realLanding(d)].some((q) => q && f === q)));
+}
+
+/**
+ * True when a path is a git guard: a hook under .git/hooks (there or new: writing one installs it),
+ * or a hook-named file in the folder core.hooksPath names. Links are followed.
+ */
+function isGuardFile(p, ctx) {
+  if (!p) return false;
+  const dirs = configuredHooksDirs(ctx);
+  return pathForms(p).some((f) => isGitGuardPath(f) || dirs.some((d) => [d, realLanding(d)].some((q) => q && isWithin(f, q) && f !== q && isHookName(path.basename(f)))));
+}
+
 /** True for a guard file that is there now: changing its content changes the guard. */
 function existingGuardFile(p) {
   if (!p || /[*?[]/.test(p)) return false;
@@ -4479,6 +4598,8 @@ function findGuardHit(args, argDyn, ctx, argSub = []) {
     const known = guardPathWord(root.w, root.dyn, ctx);
     const dyn = root.dyn ? dynamicGuardWord(root.w, root.sub) : null;
     const rootAbs = known ?? dyn ?? path.join(UNKNOWN_FOLDER, root.dyn ? 'folder' : root.w);
+    // The folder core.hooksPath names holds guards as .git/hooks does: deleting from it reaches them.
+    if (known && configuredHooksDirs(ctx).some((d) => [d, realLanding(d)].some((q) => q && (isWithin(known, q) || isWithin(q, known))))) return known;
     const { list, gitDir, holdsRepo } = findGuardCandidates(dyn ? guardShown(dyn, ctx) : root.w, rootAbs);
     // "find . -path ./.git -prune -o ... -delete": the .git folder is never entered.
     const pruned = !parens && gitDir && all.some((b) => b.prune && !b.deletes && b.tests.some((t) => !t.negated) && findBranchMatches(b, gitDir, false));
@@ -4628,7 +4749,7 @@ function guardShellStep(prog, rawArgs, rawDyn, ctx, { argExp = [], argSub = [], 
   const { args, argDyn, argSub: subs } = withBracesExpanded(rawArgs, rawDyn, argExp, argSub);
   const guard = (o) => {
     const p = guardPathWord(o.w, o.dyn, ctx);
-    if (p) return isGitGuardPath(p) ? p : null;
+    if (p) return isGuardPlace(p, ctx) ? p : null;
     return o.dyn ? dynamicGuardWord(o.w, o.sub) : null;
   };
   const config = (o) => {
@@ -4679,9 +4800,11 @@ function guardShellStep(prog, rawArgs, rawDyn, ctx, { argExp = [], argSub = [], 
       }
       files.push({ w: a, dyn: Boolean(argDyn[k]), sub: subs[k] || [] });
     }
-    if (mode === null || !chmodTurnsOff(mode)) return [];
-    const hit = files.map(guard).find(Boolean);
-    if (hit) return removes(`turns off the git guard ${shown(hit)}`);
+    if (mode === null) return [];
+    // Any mode change on a guard: turning the execute bit on is what installs a hook.
+    const hit = files.map(guard).find(Boolean) ?? files.map((o) => guardPathWord(o.w, o.dyn, ctx)).find((q) => q && isGuardFile(q, ctx));
+    if (hit) return removes(`changes the mode of the git guard ${shown(hit)}`);
+    if (!chmodTurnsOff(mode)) return [];
     const reached = recursive ? files.map((o) => repositoryReached(o, ctx)).find((r) => r && r.guards) : null;
     return reached ? removes(`turns off every git guard of ${shown(reached.folder)}`) : [];
   }
@@ -4756,7 +4879,7 @@ function guardShellStep(prog, rawArgs, rawDyn, ctx, { argExp = [], argSub = [], 
     const d = guard(dest);
     if (!d) return [];
     // Over a guard that is there, or into the hooks folder over one of the same name.
-    const over = existingGuardFile(d) ? d : sources.map((s) => path.join(d, path.basename(String(s.w)))).find((p) => existingGuardFile(p) && isGitGuardPath(p));
+    const over = existingGuardFile(d) ? d : sources.map((s) => path.join(d, path.basename(String(s.w)))).find((p) => existingGuardFile(p) && isGuardFile(p, ctx));
     return over ? removes(`replaces the git guard ${shown(over)}`) : [];
   }
   return [];
@@ -4778,7 +4901,7 @@ function guardRedirect(seg, ctx, hooksText = false) {
     for (const target of expanded ?? [r.target]) {
       const p = guardPathWord(target, r.dynamic, ctx) ?? (ctx.cwdUnknown && !r.dynamic ? path.join(UNKNOWN_FOLDER, String(target)) : null);
       if (!p) continue;
-      if (isGitConfigPath(p)) {
+      if (pathForms(p).some(isGitConfigPath)) {
         const overwrites = ['>', '>|', '&>', '>&'].includes(r.op);
         const text = shownOutput(seg);
         if (hooksText || text === null || namesHooksPath(text) || (overwrites && fileMentionsHooksPath(p))) {
@@ -4786,7 +4909,7 @@ function guardRedirect(seg, ctx, hooksText = false) {
         }
         return [{ resource: null, why: `changes the git settings in ${guardShown(p, ctx)}, which can make git run commands` }];
       }
-      if (['>', '>|', '&>', '>&'].includes(r.op) && isGitGuardPath(p) && existingGuardFile(p)) return [{ resource: INCIDENT_RESOURCES.removeGuard, why: `empties or rewrites the git guard ${guardShown(p, ctx)}` }];
+      if (isGuardFile(p, ctx)) return [{ resource: INCIDENT_RESOURCES.removeGuard, why: `writes the git guard ${guardShown(p, ctx)}` }];
     }
   }
   return [];
@@ -4836,14 +4959,34 @@ const GIT_CONFIG_VALUE_OPTIONS = new Set(['-f', '--file', '--blob', '--type', '-
  */
 function gitWrittenFiles(sub, rest, restDyn) {
   const found = [];
+  const fileOption = sub === 'archive' || sub === 'format-patch';
   for (let k = 0; k < rest.length; k += 1) {
     const a = String(rest[k]);
     if (a === '--') break;
-    const glued = /^--output(?:-directory)?=(.*)$/s.exec(a);
-    if (glued) found.push({ word: glued[1], dyn: Boolean(restDyn[k]) });
-    else if (a === '--output' || a === '--output-directory' || (a === '-o' && (sub === 'archive' || sub === 'format-patch'))) {
-      found.push({ word: rest[k + 1], dyn: Boolean(restDyn[k + 1]) });
-      k += 1;
+    if (a.startsWith('--')) {
+      // git takes any unambiguous start of a long option ("--out=x" is "--output=x").
+      const m = /^--([a-z][a-z-]*)(?:=(.*))?$/s.exec(a);
+      if (!m) continue;
+      const name = m[1];
+      const output = name.length >= 3 && 'output'.startsWith(name);
+      const directory = name.length > 'output'.length && 'output-directory'.startsWith(name);
+      if (!output && !directory) continue;
+      if (m[2] !== undefined) found.push({ word: m[2], dyn: Boolean(restDyn[k]), folder: directory });
+      else {
+        found.push({ word: rest[k + 1], dyn: Boolean(restDyn[k + 1]), folder: directory });
+        k += 1;
+      }
+      continue;
+    }
+    const cluster = fileOption ? /^-([A-Za-z0-9]*?)o([\s\S]*)$/.exec(a) : null;
+    if (cluster) {
+      // -o FILE, glued (-oFILE) or at the end of a cluster of short options (-ko FILE, -ko/x).
+      const glued = cluster[2];
+      if (glued) found.push({ word: glued, dyn: Boolean(restDyn[k]), folder: sub === 'format-patch' });
+      else {
+        found.push({ word: rest[k + 1], dyn: Boolean(restDyn[k + 1]), folder: sub === 'format-patch' });
+        k += 1;
+      }
     }
   }
   if (sub === 'bundle') {
@@ -4851,7 +4994,136 @@ function gitWrittenFiles(sub, rest, restDyn) {
     const k = at === -1 ? -1 : rest.findIndex((w, i) => i > at && !String(w).startsWith('-'));
     if (k !== -1) found.push({ word: rest[k], dyn: Boolean(restDyn[k]) });
   }
+  if (sub === 'checkout-index') {
+    // --prefix=DIR (or --prefix DIR) is put in front of every file name it writes: judged as a folder.
+    for (let k = 0; k < rest.length; k += 1) {
+      const a = String(rest[k]);
+      if (a === '--') break;
+      const glued = /^--prefix=(.*)$/s.exec(a);
+      if (glued) found.push({ word: glued[1], dyn: Boolean(restDyn[k]), folder: true, prefix: true });
+      else if (a === '--prefix') {
+        found.push({ word: rest[k + 1], dyn: Boolean(restDyn[k + 1]), folder: true, prefix: true });
+        k += 1;
+      }
+    }
+  }
+  if (sub === 'worktree' && String(rest[0] ?? '') === 'add') {
+    // git worktree add [options] <path> [<commit-ish>]: -b and -B (and --reason) take a value.
+    for (let k = 1; k < rest.length; k += 1) {
+      const a = String(rest[k]);
+      if (a === '--') {
+        if (k + 1 < rest.length) found.push({ word: rest[k + 1], dyn: Boolean(restDyn[k + 1]), folder: true });
+        break;
+      }
+      if (a === '-b' || a === '-B' || a === '--reason') {
+        k += 1;
+        continue;
+      }
+      if (a.startsWith('-')) continue;
+      found.push({ word: a, dyn: Boolean(restDyn[k]), folder: true });
+      break;
+    }
+  }
+  if (sub === 'worktree' && String(rest[0] ?? '') === 'move') {
+    // git worktree move <worktree> <new-path>: the new path is where it lands.
+    const at = [];
+    for (let k = 1; k < rest.length; k += 1) if (!String(rest[k]).startsWith('-')) at.push(k);
+    if (at.length >= 2) found.push({ word: rest[at[1]], dyn: Boolean(restDyn[at[1]]), folder: true });
+  }
   return found.filter((f) => typeof f.word === 'string' && f.word !== '');
+}
+
+/** The steps whose files land where their own words say, so the whole step must be read with certainty. */
+const GIT_LANDING_STEPS = new Set(['archive', 'format-patch', 'checkout-index', 'worktree', 'bundle', 'log', 'diff', 'show', 'range-diff']);
+const GIT_NARROW_STEPS = new Set(['archive', 'format-patch', 'checkout-index', 'worktree', 'bundle']);
+const GIT_ARCHIVE_OPTIONS = /^(--format(=.*)?|--list|-l|--verbose|-v|--prefix(=.*)?|--add-file(=.*)?|--add-virtual-file(=.*)?|--worktree-attributes|-[0-9]|--output(=.*)?)$/;
+const GIT_CHECKOUT_INDEX_OPTIONS = /^(-u|-q|-a|-f|-n|-z|--all|--force|--index|--no-create|--stdin|--quiet|--ignore-skip-worktree-bits|--prefix=.*|--prefix|--stage=.*)$/;
+const GIT_WORKTREE_ADD_OPTIONS = /^(-f|--force|--detach|--checkout|--no-checkout|--guess-remote|--no-guess-remote|--track|--no-track|--lock|--orphan|-q|--quiet|--relative-paths|--no-relative-paths|-b|-B|--reason|--reason=.*)$/;
+const GIT_BUNDLE_CREATE_OPTIONS = /^(-q|--quiet|--progress|--all-progress|--all-progress-implied|--version=\d+)$/;
+
+/** True when the NAME of an option word is built when the command runs ("-$N", "--$N", "--out$X=1"), not only its value. */
+function runTimeOptionName(w) {
+  if (!w.startsWith('-')) return false;
+  if (w.startsWith('--')) return /[$`]/.test(w.slice(2).split('=')[0]);
+  return /^-[$`]/.test(w);
+}
+
+/**
+ * Whether Aimiru can name every place a git step writes, from its words. When it cannot, the step
+ * is "other" and asked about: an option it does not know in full, one written as a start of its name
+ * (--prefi=x), a cluster with an option that takes a value (-fb), a word built when the command runs
+ * that could be an option, an option after "--", or an alias whose words need quote handling.
+ * Returns why it is not certain, or null.
+ */
+function gitLandingDoubt(sub, words, dyn, aliasQuoted) {
+  if (!GIT_LANDING_STEPS.has(sub)) return null;
+  if (aliasQuoted) return 'runs a git alias whose words Aimiru cannot split with certainty';
+  const narrow = GIT_NARROW_STEPS.has(sub);
+  const end = words.indexOf('--');
+  for (let k = 0; k < words.length; k += 1) {
+    const w = String(words[k]);
+    // After "--" a read (log, diff, show, range-diff) only has paths.
+    if (!narrow && end !== -1 && k > end) break;
+    if (dyn[k]) {
+      // Built when the command runs: for the steps that write a file any such option is doubtful; for the
+      // reads only an option whose NAME is built that way is (--author="$(...)", -S"$T" and
+      // --format="%h $X" carry a value, which names no file).
+      if (narrow ? /^-/.test(w) || /^[$`]/.test(w) : runTimeOptionName(w)) return 'runs git with an option built when the command runs';
+    }
+    if (narrow && end !== -1 && k > end && w.startsWith('-')) return 'runs git with an option after "--"';
+  }
+  const options = (to) => words.slice(sub === 'worktree' || sub === 'bundle' ? 1 : 0, to === -1 ? words.length : to).filter((w) => String(w).startsWith('-'));
+  const before = end === -1 ? -1 : end;
+  if (sub === 'archive') {
+    for (const w of options(before)) if (!GIT_ARCHIVE_OPTIONS.test(w) && !/^-[A-Za-z0-9]*?o/.test(w)) return `runs git archive with an option Aimiru does not know (${w})`;
+  }
+  if (sub === 'checkout-index') {
+    for (const w of options(before)) if (!GIT_CHECKOUT_INDEX_OPTIONS.test(w)) return `runs git checkout-index with an option Aimiru does not know in full (${w})`;
+  }
+  if (sub === 'worktree' && words[0] === 'add') {
+    for (let k = 1; k < words.length; k += 1) {
+      const w = String(words[k]);
+      if (w === '--') break;
+      if (!w.startsWith('-')) continue;
+      if (!GIT_WORKTREE_ADD_OPTIONS.test(w)) return `runs git worktree add with an option Aimiru does not know in full (${w})`;
+      if (w === '-b' || w === '-B' || w === '--reason') k += 1;
+    }
+  }
+  if (sub === 'bundle' && words[0] === 'create') {
+    for (let k = 1; k < words.length; k += 1) {
+      const w = String(words[k]);
+      if (!w.startsWith('-')) break;
+      if (!GIT_BUNDLE_CREATE_OPTIONS.test(w)) return `runs git bundle with an option Aimiru does not know (${w})`;
+    }
+  }
+  return null;
+}
+
+/** The nearest folder at or above `dir` that has a .git: the top of the working tree git runs in. */
+function gitTopOf(dir) {
+  for (let d = dir, hops = 0; d && hops < 64; hops += 1) {
+    if (pathExists(path.join(d, '.git'))) return d;
+    const up = path.dirname(d);
+    if (up === d) return null;
+    d = up;
+  }
+  return null;
+}
+
+/**
+ * The folder git runs in after its own -C options (they apply in order, each from the one before):
+ * relative paths in the step's options are relative to it. Null when one is built when the command runs.
+ */
+function gitWorkDir(args, argDyn, g, ctx) {
+  let dir = ctx.cwdUnknown ? null : ctx.cwd;
+  for (let k = 0; k < g.index; k += 1) {
+    const a = args[k];
+    if (a === '-C') {
+      dir = dir && !argDyn[k + 1] ? path.resolve(dir, String(args[k + 1] ?? '').replace(/^~(?=$|\/)/, ctx.home)) : null;
+      k += 1;
+    } else if (GIT_VALUE_OPTS.has(a)) k += 1;
+  }
+  return dir;
 }
 
 /** git steps that run the guards, and the switch that skips them (commit also takes -n). */
@@ -5393,6 +5665,42 @@ function isSubcommandProgram(prog) {
     ]);
   }
   return SUBCOMMAND_PROGRAMS.has(prog);
+}
+
+/**
+ * Where a file written by a tool or a command lands, judged as the Write tool judges it: the maker's
+ * settings or Aimiru's files (and, for a folder, one that would hold them) are a protected change; a
+ * git guard that is there is a guard removal; git's own settings files are "other"; the project or a
+ * temporary folder is local work; anywhere else is a change.
+ * @returns {{cls: string, resource?: string, sensitive?: boolean, why: string}}
+ */
+function writeLanding(p, ctx, { folder = false } = {}) {
+  if (isProtectedPath(p, ctx) || (folder && wouldHoldProtectedPath(p, ctx))) {
+    return { cls: 'delete', resource: INCIDENT_RESOURCES.removeGuard, sensitive: true, why: `writes ${p}, the agent's own settings or Aimiru's files` };
+  }
+  if (isGuardFile(p, ctx) || (folder && pathForms(p).some(isGitGuardPath))) {
+    return { cls: 'delete', resource: INCIDENT_RESOURCES.removeGuard, sensitive: true, why: `changes the git guard ${p}` };
+  }
+  if (pathForms(p).some(isGitConfigPath)) return { cls: 'other', why: `writes git settings: ${p}` };
+  if (isInsideWorkArea(p, ctx)) return { cls: 'read', resource: LOCAL_WORK_RESOURCE, why: `writes ${p}` };
+  return { cls: 'write', why: `writes outside the project: ${p}` };
+}
+
+/** A file or folder a command writes where its own words say (git --output, checkout-index --prefix, worktree add): adds its class to the command. */
+function noteLanding(out, p, ctx, { folder = false, skipProtected = false } = {}) {
+  noteWritten(out, p);
+  if (!p) {
+    out.classes.push('write');
+    out.why.push('writes to a place only known when the command runs');
+    return;
+  }
+  const l = writeLanding(p, ctx, { folder });
+  if (l.cls === 'delete') {
+    if (!skipProtected) protectedChange(out, l.why);
+  } else if (l.cls === 'other' || l.cls === 'write') {
+    out.classes.push(l.cls);
+    out.why.push(l.why);
+  }
 }
 
 function classifyTargetsForWrite(targets, dyn, ctx, out) {
@@ -5954,6 +6262,8 @@ function classifySegment(seg, ctx, out, depth) {
     let sub = g.sub;
     /** Words an alias adds after its step ("-c alias.p='push --force'"). */
     const aliasWords = [];
+    /** An alias whose words carry quotes or escapes: how it splits into words is not certain. */
+    let aliasQuoted = false;
     // -c alias.x='!cmd' runs a command; -c alias.x=push is another name for push (and may chain).
     for (let hops = 0; g.aliases.has(sub); hops += 1) {
       const alias = g.aliases.get(sub);
@@ -5967,6 +6277,7 @@ function classifySegment(seg, ctx, out, depth) {
       }
       if (alias.dynamic) unknownProgram(out, 'runs git with a step named only when it runs');
       const aliasParts = alias.value.trim().split(/\s+/);
+      if (/["'\\]/.test(alias.value)) aliasQuoted = true;
       aliasWords.push(...aliasParts.slice(1));
       sub = (aliasParts[0] || '').toLowerCase();
     }
@@ -6038,15 +6349,37 @@ function classifySegment(seg, ctx, out, depth) {
       const k = rest.indexOf('foreach');
       classifyCommandText(rest.slice(k + 1).filter((a) => !a.startsWith('-')).join(' '), restDyn.slice(k + 1).some(Boolean), ctx, out, depth);
     }
-    // A file git itself writes where the command says (--output, archive -o, format-patch -o, bundle
-    // create): the maker's settings or Aimiru's files there, or a folder holding them, are a
-    // protected change (security review, 28 Oct).
-    for (const f of gitWrittenFiles(sub, rest, restDyn)) {
-      const p = f.dyn ? null : resolvePathWord(f.word, ctx);
-      if (p && (isProtectedPath(p, ctx) || holdsProtectedPath(p, ctx))) {
-        if (!/disableallhooks/i.test(joined)) protectedChange(out, `writes ${p}, the agent's own settings or Aimiru's files`);
-        return;
+    // A file or folder git itself writes where the command says (--output, archive -o, format-patch -o,
+    // bundle create, checkout-index --prefix, worktree add), with the words an alias adds and relative
+    // to the folder git -C moved to: judged as the Write tool judges where it lands.
+    const workDir = gitWorkDir(args, argDyn, g, ctx);
+    const landCtx = workDir ? { ...ctx, cwd: workDir } : { ...ctx, cwdUnknown: true };
+    const stepRest = [...aliasWords, ...rest];
+    const stepRestDyn = [...aliasWords.map(() => false), ...restDyn];
+    const doubt = gitLandingDoubt(sub, stepRest, stepRestDyn, aliasQuoted);
+    if (doubt) {
+      out.classes.push('other');
+      out.why.push(doubt);
+    }
+    for (const f of gitWrittenFiles(sub, stepRest, stepRestDyn)) {
+      // checkout-index --prefix is put in front of paths from the top of the working tree.
+      let base = landCtx;
+      if (f.prefix && !path.isAbsolute(String(f.word)) && !/^[~$]/.test(String(f.word))) {
+        const top = workDir ? gitTopOf(workDir) : null;
+        if (!top) {
+          out.classes.push('other');
+          out.why.push('runs git checkout-index with a prefix Aimiru cannot place from the top of the working tree');
+          continue;
+        }
+        base = { ...ctx, cwd: top };
       }
+      const target = resolvePathWord(f.word, base);
+      // A folder that holds the maker's settings or Aimiru's files is a protected change, as before.
+      if (target && holdsProtectedPath(target, ctx) && !/disableallhooks/i.test(joined)) {
+        protectedChange(out, `writes ${target}, the agent's own settings or Aimiru's files`);
+        continue;
+      }
+      noteLanding(out, target, ctx, { folder: f.folder === true, skipProtected: /disableallhooks/i.test(joined) });
     }
     if ((INSTALL_SUBCOMMANDS.git || []).includes(sub) || ['archimport', 'cvsimport', 'cvsexportcommit', 'svn', 'p4', 'http-fetch', 'fetch-pack'].includes(sub) || sub.startsWith('remote-') || (sub === 'archive' && rest.some((a) => /^--remote/.test(a)))) {
       out.classes.push('other');
@@ -6364,6 +6697,30 @@ function classifySegment(seg, ctx, out, depth) {
     // Where each source lands (landsOnProtected): "cp x/settings.json ~/.claude/" writes over a
     // protected file the destination word does not name, and "cp -r x/.claude ~" lands a folder
     // holding one.
+    // A link points at something: one to a place outside the project, or to the maker's settings, is a
+    // change as a copy of it would be, so a link made here can never smuggle a later write past the check.
+    if (prog === 'ln') {
+      const symbolic = args.some((a) => a === '--symbolic' || (/^-[A-Za-z]+$/.test(a) && a.includes('s')));
+      const destWord = t || (nf.length >= 2 ? nf[nf.length - 1] : '.');
+      const destDyn = t ? false : nf.length >= 2 ? nd[nd.length - 1] : false;
+      const destAbs = destDyn ? null : resolvePathWord(destWord, ctx);
+      const linkDir = destAbs ? (t || isFolder(destAbs) ? destAbs : path.dirname(destAbs)) : null;
+      const pointed = t ? nf : nf.length >= 2 ? nf.slice(0, -1) : nf;
+      const pointedDyn = t ? nd : nf.length >= 2 ? nd.slice(0, -1) : nd;
+      pointed.forEach((word, k) => {
+        // A symbolic link's relative target counts from the folder the link is in; a hard link's from here.
+        const base = symbolic ? linkDir : ctx.cwd;
+        const at = pointedDyn[k] || !base ? null : resolvePathWord(word, { ...ctx, cwd: base, cwdUnknown: false });
+        if (!at) {
+          out.classes.push('write');
+          out.why.push('links to a place only known when the command runs');
+        } else if (isProtectedPath(at, ctx) || wouldHoldProtectedPath(at, ctx)) protectedChange(out, `links to ${at}, the agent's own settings or Aimiru's files`);
+        else if (!isInsideWorkArea(at, ctx)) {
+          out.classes.push('write');
+          out.why.push(`links to a place outside the project: ${at}`);
+        }
+      });
+    }
     const into = t || (nf.length >= 2 && !nd[nd.length - 1] ? nf[nf.length - 1] : null);
     const intoAbs = into ? resolvePathWord(into, ctx) : null;
     const sources = t ? nf : nf.slice(0, -1);
@@ -7197,16 +7554,157 @@ function personalResourceOf(words, args) {
 const MCP_NAME_RE = /^mcp__(.+?)__(.+)$/;
 
 /**
- * Claude Code tools that only read or only touch Claude Code's own session state. The plugin's
- * matcher leaves them out (no check at all); listed here too so a check that reaches them is "read".
- * Keep in step with the negative list in claude-code/hooks/hooks.json.
+ * Claude Code's built-in tools, what each does, and what Aimiru makes of it. Source: Claude Code's
+ * tools reference, https://code.claude.com/docs/en/tools-reference, read on 11 Nov 2026 (the
+ * table of built-in tool names and descriptions). StructuredOutput and ReadNotifications are not in
+ * that table (Claude Code's headless and notification plumbing); both were seen in Aimiru's 11 Nov
+ * 2026 live run, where StructuredOutput was asked about as "something Aimiru didn't understand".
+ *
+ * effect:
+ *   none     no effect outside the session: session bookkeeping, plans, questions to the person,
+ *            reminders and tools Claude Code runs on its own state. Never asked about, never "new".
+ *   read     reads this computer's files or code intelligence; nothing changes, nothing leaves.
+ *   net_read reads the web (WebFetch, WebSearch): a read that leaves this computer (net.get).
+ *   change   changes files or the folder tree (Write, Edit, NotebookEdit, worktrees).
+ *   shell    runs a command: classified by the command itself (classifyCommand).
+ *   helper   starts a helper; the helper's own steps are each checked as they happen.
+ *   publish  puts something on claude.ai or sends it from this computer (Artifact: by its action).
+ *   send     sends or messages (SendMessage by its target, RemoteTrigger, notifications, files).
+ *   other    something Aimiru does not read as harmless: asked about, as any unknown tool is.
+ * A tool not in this table, and any MCP tool, is decided as before (MCP: by its annotations and
+ * name, classifyToolName; unknown: "other", asked about, fail safe).
  */
-export const READ_ONLY_BUILTINS = new Set([
-  'Read', 'Glob', 'Grep', 'LS', 'NotebookRead', 'TodoWrite', 'TodoRead', 'TaskCreate', 'TaskUpdate', 'TaskGet',
-  'TaskList', 'TaskOutput', 'TaskStop', 'BashOutput', 'KillShell', 'KillBash', 'ToolSearch', 'AskUserQuestion',
-  'ExitPlanMode', 'EnterPlanMode', 'ListMcpResourcesTool', 'ReadMcpResourceTool', 'ReadMcpResourceDirTool', 'LSP',
-  'CronList', 'CronDelete', 'Skill',
-]);
+export const CLAUDE_CODE_BUILTIN_TOOLS = Object.freeze({
+  AskUserQuestion: { effect: 'none', what: 'asks the person a multiple-choice question' },
+  BashOutput: { effect: 'none', what: 'reads output of a background command the session started (older name)' },
+  CronCreate: { effect: 'other', what: 'schedules a prompt to run later in the session (asked about, as before)' },
+  CronDelete: { effect: 'none', what: 'cancels a session-scoped scheduled task' },
+  CronList: { effect: 'none', what: 'lists session-scoped scheduled tasks' },
+  EndConversation: { effect: 'none', what: 'ends the session' },
+  EnterPlanMode: { effect: 'none', what: 'switches the session to plan mode' },
+  ExitPlanMode: { effect: 'none', what: 'presents a plan to the person for approval' },
+  KillBash: { effect: 'none', what: 'stops a background command the session started (older name)' },
+  KillShell: { effect: 'none', what: 'stops a background command the session started (older name)' },
+  ListAgents: { effect: 'none', what: 'lists the agents Claude can message' },
+  ReadNotifications: { effect: 'none', what: 'reads the session\'s own notices' },
+  ReportFindings: { effect: 'none', what: 'shows code-review findings as a list in the session' },
+  ScheduleWakeup: { effect: 'none', what: 'picks when the next pass of a self-paced loop runs' },
+  SubagentHandback: { effect: 'none', what: 'a helper hands its final report back to its own parent session' },
+  Skill: { effect: 'none', what: 'loads a skill\'s instructions into the conversation' },
+  StructuredOutput: { effect: 'none', what: 'hands Claude Code its final answer in a fixed shape' },
+  TaskCreate: { effect: 'none', what: 'adds to the session\'s task list' },
+  TaskGet: { effect: 'none', what: 'reads one task of the session\'s task list' },
+  TaskList: { effect: 'none', what: 'lists the session\'s tasks' },
+  TaskOutput: { effect: 'none', what: 'reads a background task\'s output (removed in 2.1.277)' },
+  TaskStop: { effect: 'none', what: 'stops a background task the session started' },
+  TaskUpdate: { effect: 'none', what: 'updates the session\'s task list' },
+  TodoRead: { effect: 'none', what: 'reads the session\'s checklist' },
+  TodoWrite: { effect: 'none', what: 'writes the session\'s checklist' },
+  ToolSearch: { effect: 'none', what: 'finds and loads tools that were left out of the prompt' },
+  WaitForMcpServers: { effect: 'none', what: 'waits for connected tool servers to finish starting' },
+  Glob: { effect: 'read', what: 'finds files by pattern' },
+  Grep: { effect: 'read', what: 'searches inside files' },
+  ListMcpResourcesTool: { effect: 'read', what: 'lists what connected servers offer to read' },
+  LS: { effect: 'read', what: 'lists a folder' },
+  LSP: { effect: 'read', what: 'code intelligence from language servers' },
+  NotebookRead: { effect: 'read', what: 'reads a notebook' },
+  Read: { effect: 'read', what: 'reads a file' },
+  ReadMcpResourceDirTool: { effect: 'read', what: 'reads a folder of resources a server offers' },
+  ReadMcpResourceTool: { effect: 'read', what: 'reads one resource a server offers' },
+  WebFetch: { effect: 'net_read', what: 'fetches a web page' },
+  WebSearch: { effect: 'net_read', what: 'searches the web' },
+  Edit: { effect: 'change', what: 'edits a file' },
+  EnterWorktree: { effect: 'change', what: 'creates a git worktree and switches into it' },
+  ExitWorktree: { effect: 'change', what: 'leaves a worktree' },
+  MultiEdit: { effect: 'change', what: 'edits a file in several places' },
+  NotebookEdit: { effect: 'change', what: 'edits notebook cells' },
+  Write: { effect: 'change', what: 'creates or overwrites a file' },
+  Bash: { effect: 'shell', what: 'runs a shell command' },
+  Monitor: { effect: 'shell', what: 'runs a command in the background and feeds back its lines' },
+  PowerShell: { effect: 'shell', what: 'runs a PowerShell command' },
+  Agent: { effect: 'helper', what: 'starts a helper with its own context' },
+  Task: { effect: 'helper', what: 'starts a helper (older name of Agent)' },
+  Workflow: { effect: 'helper', what: 'runs a script of many helpers' },
+  Artifact: { effect: 'publish', what: 'publishes a page to claude.ai, or reads, lists and opens the ones already there' },
+  PushNotification: { effect: 'send', what: 'sends a notification to the person\'s desktop and phone' },
+  RemoteTrigger: { effect: 'send', what: 'creates, changes, runs and lists scheduled cloud tasks' },
+  SendFeedback: { effect: 'send', what: 'drafts a feedback report to Anthropic' },
+  SendMessage: { effect: 'send', what: 'messages a helper of this session, or another session' },
+  SendUserFile: { effect: 'send', what: 'sends files from the session to the person\'s device' },
+  ShareOnboardingGuide: { effect: 'send', what: 'uploads a guide and returns a share link' },
+});
+
+/**
+ * The built-in tools the plugin's matcher leaves out (no check at all) and that a check reaching
+ * them reads as "read": the ones with no effect outside the session, and plain reads of this
+ * computer. Keep in step with the negative list in claude-code/hooks/hooks.json (a test does).
+ */
+export const READ_ONLY_BUILTINS = new Set(
+  Object.entries(CLAUDE_CODE_BUILTIN_TOOLS)
+    .filter(([, t]) => t.effect === 'none' || t.effect === 'read')
+    .map(([name]) => name),
+);
+
+/** The built-in tools with no effect outside the session (CLAUDE_CODE_BUILTIN_TOOLS, effect none). */
+export const NO_EFFECT_BUILTINS = new Set(
+  Object.entries(CLAUDE_CODE_BUILTIN_TOOLS)
+    .filter(([, t]) => t.effect === 'none')
+    .map(([name]) => name),
+);
+
+/**
+ * SendMessage reaches this session's own helpers, other sessions on this computer, cloud sessions and
+ * other machines. Only a local helper's id (the form this session's helpers are addressed by: "a" and
+ * sixteen hex digits) stays inside the session; every other target is a send, asked the first time.
+ */
+// Known limit: the shape rule below is what this session's helpers look like today; a helper addressed
+// any other way is treated as another session (a send, asked the first time and rememberable).
+function sendsInsideSession(ti) {
+  const to = ti?.to ?? ti?.recipient ?? ti?.agent ?? ti?.name ?? ti?.target;
+  return typeof to === 'string' && /^a[0-9a-f]{16}$/.test(to);
+}
+
+/** What opening an address is (WebFetch): a plain read of its host, data leaving for it, or other. */
+function webFetchFacts(url) {
+  const target = webTarget(url, { scheme: 'https' });
+  if (urlCarriesData(url)) {
+    return { cls: target.local ? 'other' : 'share', counterparty: target.local ? counterpartyOf(url) : target.host, resource: null, sensitive: !target.local && !target.host };
+  }
+  if (target.host) return { cls: 'read', counterparty: target.host, resource: WEB_READ_RESOURCE, sensitive: false };
+  return { cls: 'other', counterparty: counterpartyOf(url), resource: null, sensitive: false };
+}
+
+/**
+ * Where an Artifact call that saves files (read, list or open with a path or paths, and an out_dir)
+ * lands them: each file is the out_dir joined with its published path (an asset id keeps its id; a name
+ * that climbs out with ".." lands where it climbs to), judged as Write judges it. A name Aimiru cannot
+ * read (a pattern, a word built when it runs) falls back to the folder itself: protected if it would hold one of the protected files, else by where it is. Without
+ * an out_dir the files go to Claude's own scratch folder, and without a path nothing is saved: null.
+ * @returns {{cls: string, resource?: string, sensitive?: boolean, why: string, dir: string}|null}
+ */
+function artifactLanding(ti, ctx) {
+  const outDir = typeof ti.out_dir === 'string' && ti.out_dir.trim() ? ti.out_dir.trim() : null;
+  const names = [ti.path, ...(Array.isArray(ti.paths) ? ti.paths : [])].filter((n) => typeof n === 'string' && n.trim());
+  if (!outDir || !names.length) return null;
+  const dir = path.resolve(ctx.cwd, outDir.replace(/^~(?=$|\/)/, ctx.home));
+  const landings = [];
+  // A name that cannot be read lands somewhere in the folder: protected if the folder would hold one of
+  // the protected files, else judged by where the folder is.
+  const folderLanding = () => (isProtectedPath(dir, ctx) || wouldHoldProtectedPath(dir, ctx) ? writeLanding(dir, ctx, { folder: true }) : writeLanding(dir, ctx));
+  for (const name of names) {
+    const rel0 = /^[0-9a-f]{32}$/.test(name) ? name : path.posix.normalize(name.replace(/\\/g, '/').replace(/^\/+/, ''));
+    if (rel0 === '.' || /[*?[$`]/.test(rel0)) {
+      landings.push(folderLanding());
+      continue;
+    }
+    landings.push(writeLanding(path.resolve(dir, rel0), ctx));
+  }
+  const worst = landings.reduce((a, b) => (strongest(a.cls, b.cls) === b.cls && a.cls !== b.cls ? b : a));
+  return { ...worst, dir };
+}
+
+/** What Artifact's `action` does: the ones that only look are reads of claude.ai; the rest publish or change it. */
+const ARTIFACT_READ_ACTIONS = new Set(['read', 'list', 'open', 'quickstart']);
 
 export function splitMcpToolName(toolName) {
   const m = MCP_NAME_RE.exec(String(toolName ?? ''));
@@ -7353,21 +7851,21 @@ export function actionForClaudeCodeTool(input, opts = {}) {
       resource = INCIDENT_RESOURCES.removeGuard;
       sensitive = true;
       description = `${verb} Claude Code or Aimiru settings: ${p}`;
-    } else if (p && isGitGuardPath(p) && existingGuardFile(p)) {
-      // Changing a git guard that is there can turn it off (ADR-0111): never local work. Writing a
-      // new hook where none is installs a guard, which stays local work, as it is from the shell.
+    } else if (p && isGuardFile(p, ctx)) {
+      // Changing a git guard that is there can turn it off, and a new hook installs one (ADR-0111):
+      // never local work.
       cls = 'delete';
       resource = INCIDENT_RESOURCES.removeGuard;
       sensitive = true;
       description = `${verb} ${rel(p, ctx)}`;
-    } else if (p && isGitConfigPath(p) && settingsEditTouchesHooksPath(toolName, ti, p)) {
+    } else if (p && pathForms(p).some(isGitConfigPath) && settingsEditTouchesHooksPath(toolName, ti, p)) {
       // Setting or taking away core.hooksPath in a git settings file changes where git takes its
       // guards from (ADR-0111 review): never local work, as "git config core.hooksPath" is not.
       cls = 'delete';
       resource = INCIDENT_RESOURCES.removeGuard;
       sensitive = true;
       description = `${verb} ${rel(p, ctx)}`;
-    } else if (p && isGitConfigPath(p)) {
+    } else if (p && pathForms(p).some(isGitConfigPath)) {
       // Any other change to a git settings file can make git run commands (an include, an
       // fsmonitor, an sshCommand), so it is never local work either (ADR-0111 review).
       cls = 'other';
@@ -7384,19 +7882,11 @@ export function actionForClaudeCodeTool(input, opts = {}) {
     // A plain read goes ahead and is recorded: read, net.get, the host. An address that carries
     // data is data leaving for that host (ADR-0146); to this computer it stays other, as before.
     const url = String(ti.url ?? '');
-    const target = webTarget(url, { scheme: 'https' });
-    if (urlCarriesData(url)) {
-      cls = target.local ? 'other' : 'share';
-      counterparty = target.local ? counterpartyOf(url) : target.host;
-      sensitive = !target.local && !target.host;
-    } else if (target.host) {
-      cls = 'read';
-      resource = WEB_READ_RESOURCE;
-      counterparty = target.host;
-    } else {
-      cls = 'other';
-      counterparty = counterpartyOf(url);
-    }
+    const w = webFetchFacts(url);
+    cls = w.cls;
+    counterparty = w.counterparty;
+    resource = w.resource;
+    sensitive = w.sensitive;
     description = `Open ${url}`;
   } else if (toolName === 'WebSearch') {
     cls = 'read';
@@ -7443,6 +7933,53 @@ export function actionForClaudeCodeTool(input, opts = {}) {
     if (c.amount != null) extra = { amount: c.amount, ...(c.currency ? { currency: c.currency } : {}) };
     if (c.checkout) extra.checkout = c.checkout;
     description = `Use ${tool} from ${serverName}`;
+  } else if (toolName === 'Artifact') {
+    // The action decides first. Publishing (the default), uploading, pinning and the rest put a page
+    // on claude.ai (private by default): data going to a place, so share with that host, asked the
+    // first time; delete is a delete. Looking at one (read, list, open) is a plain web read, and when
+    // it saves files into an out_dir the call names, the files' landing is judged as Write judges it
+    // and the stricter of the two classes holds.
+    const act = String(ti.action ?? 'publish');
+    counterparty = 'claude.ai';
+    if (!ARTIFACT_READ_ACTIONS.has(act)) {
+      cls = act === 'delete' ? 'delete' : 'share';
+      description = act === 'delete' ? 'Delete a page on claude.ai' : `Publish a page to claude.ai${act === 'publish' ? '' : ` (${act})`}`;
+    } else {
+      cls = 'read';
+      resource = WEB_READ_RESOURCE;
+      description = `Look at a page on claude.ai (${act})`;
+      // An address that is not claude.ai is opened as WebFetch opens it.
+      const url = typeof ti.url === 'string' ? ti.url.trim() : '';
+      const foreign = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) && !/(^|\.)claude\.ai$/i.test(webTarget(url, { scheme: 'https' }).host || '');
+      if (foreign) {
+        const w = webFetchFacts(url);
+        cls = w.cls;
+        counterparty = w.counterparty;
+        resource = w.resource;
+        sensitive = w.sensitive;
+        description = `Open ${url}`;
+      }
+      const land = artifactLanding(ti, ctx);
+      if (land) {
+        const stronger = strongest(cls, land.cls);
+        // A page opened from another address stays that web read unless the landing is stronger.
+        if (!foreign || stronger !== cls) {
+          counterparty = null;
+          cls = stronger;
+          resource = land.resource ?? null;
+          sensitive = land.sensitive === true;
+          description = land.cls === 'read' ? `Save files from claude.ai into ${rel(land.dir, ctx)}` : `Save files from claude.ai: ${land.why}`;
+        }
+      }
+    }
+  } else if (toolName === 'SendMessage') {
+    if (sendsInsideSession(ti)) {
+      cls = 'read';
+      description = 'Message a helper of this session';
+    } else {
+      cls = 'send';
+      description = 'Message another session';
+    }
   } else if (READ_ONLY_BUILTINS.has(toolName)) {
     cls = 'read';
     description = `Use ${toolName}`;

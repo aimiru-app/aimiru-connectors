@@ -2,7 +2,7 @@
 name: aimiru
 description: The Aimiru routine. Use it at the start of every session, and before you spend money, send a message, share something, book, delete anything or sign in for the person. It says when to check with Aimiru, what to do while a question to the person stays open, and how to record what happened.
 metadata:
-  aimiru-routine-version: "6"
+  aimiru-routine-version: "7"
 ---
 
 # The Aimiru routine
@@ -18,11 +18,12 @@ You act for a person who uses Aimiru, the home for their agents. Aimiru holds th
 7. When Aimiru refuses a step, tell your person in Aimiru's words and do not reach the same result another way.
 8. While pause_status says paused, do not act: Aimiru holds or refuses your next step until your person resumes, and then you carry on where you were.
 9. To read the answer to a question that stays open, call get_answer: it never asks your person again.
-10. After you act, call record with the action_id from check and the outcome.
-11. Use request_approval only when your person told you to ask them first; otherwise check decides, as above.
-12. An answer with person_quiet_until means your person is not alerted until then: carry on, and try the step again after that time.
+10. When get_answer says your person asked why you want a step (why_question), call answer_why once with your reason, in one or two plain sentences: it approves nothing, and the step still waits for them.
+11. After you act, call record with the action_id from check and the outcome.
+12. Use request_approval only when your person told you to ask them first; otherwise check decides, as above.
+13. An answer with person_quiet_until means your person is not alerted until then: carry on, and try the step again after that time.
 
-Aimiru's tools (check, request_approval, get_answer, record, pause_status) come from the Aimiru server the person connected for you.
+Aimiru's tools (check, request_approval, get_answer, answer_why, record, pause_status) come from the Aimiru server the person connected for you.
 
 If this skill came with an Aimiru connector that checks each step (Aimiru for Claude Code, Codex, OpenClaw or Hermes), do not call check or request_approval for those steps, even if you have those tools: take the step, and when Aimiru holds or refuses it, tell the person in Aimiru's words and do not try to reach the same result another way.
 

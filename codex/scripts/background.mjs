@@ -2,9 +2,10 @@
 // Aimiru's check for Codex: the background sender and Pause watcher (ADR-0095, ADR-0142), started
 // detached by pre-tool-use.mjs.
 //
-// Codex has no hook that runs after a call or when a turn ends for this check, and a new entry would
-// need the person's trust in /hooks again, so this short-lived process does what Aimiru for Claude
-// Code does in its async hooks:
+// Aimiru's record entries (ADR-0174: post-tool-use.mjs, stop.mjs, session-end.mjs) send what waits
+// too, but only once the person trusts them in /hooks, and nothing of theirs watches the Pause, so this
+// short-lived process still does what Aimiru for Claude Code does in its async hooks, whatever the
+// person has trusted:
 //   - the Pause watch (ADR-0142, CN11): while Codex works, it reads the Pause at most once every 3 s
 //     for this computer's agent (shared/pause-watch.mjs), writes the pause memory on a new Pause and
 //     confirms it to Aimiru (POST /v1/pause/ack, learned_by watch), so the next step is held. Codex

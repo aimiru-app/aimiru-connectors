@@ -17,6 +17,23 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+              "0",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/subagent-start.mjs"
+            ],
+            "timeout": 5,
+            "statusMessage": "Aimiru's brief"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -47,7 +64,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "matcher": "^(?!(?:AskUserQuestion|BashOutput|CronDelete|CronList|EndConversation|EnterPlanMode|ExitPlanMode|Glob|Grep|KillBash|KillShell|LS|LSP|ListAgents|ListMcpResourcesTool|NotebookRead|Read|ReadMcpResourceDirTool|ReadMcpResourceTool|ReadNotifications|ReportFindings|ScheduleWakeup|Skill|StructuredOutput|SubagentHandback|TaskCreate|TaskGet|TaskList|TaskOutput|TaskStop|TaskUpdate|TodoRead|TodoWrite|ToolSearch|WaitForMcpServers)$).+$",
         "hooks": [
           {
             "type": "command",
@@ -66,7 +83,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "matcher": "^(?!(?:AskUserQuestion|BashOutput|CronDelete|CronList|EndConversation|EnterPlanMode|ExitPlanMode|Glob|Grep|KillBash|KillShell|LS|LSP|ListAgents|ListMcpResourcesTool|NotebookRead|Read|ReadMcpResourceDirTool|ReadMcpResourceTool|ReadNotifications|ReportFindings|ScheduleWakeup|Skill|StructuredOutput|SubagentHandback|TaskCreate|TaskGet|TaskList|TaskOutput|TaskStop|TaskUpdate|TodoRead|TodoWrite|ToolSearch|WaitForMcpServers)$).+$",
         "hooks": [
           {
             "type": "command",
@@ -100,7 +117,7 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "matcher": "^(?!(?:AskUserQuestion|BashOutput|CronDelete|CronList|EndConversation|EnterPlanMode|ExitPlanMode|Glob|Grep|KillBash|KillShell|LS|LSP|ListAgents|ListMcpResourcesTool|NotebookRead|Read|ReadMcpResourceDirTool|ReadMcpResourceTool|ReadNotifications|ReportFindings|ScheduleWakeup|Skill|StructuredOutput|SubagentHandback|TaskCreate|TaskGet|TaskList|TaskOutput|TaskStop|TaskUpdate|TodoRead|TodoWrite|ToolSearch|WaitForMcpServers)$).+$",
         "hooks": [
           {
             "type": "command",
@@ -118,7 +135,7 @@
     ],
     "PermissionDenied": [
       {
-        "matcher": "^(?!(?:Read|Glob|Grep|LS|NotebookRead|TodoWrite|TodoRead|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|BashOutput|KillShell|KillBash|ToolSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool|LSP|CronList|CronDelete|Skill)$).+$",
+        "matcher": "^(?!(?:AskUserQuestion|BashOutput|CronDelete|CronList|EndConversation|EnterPlanMode|ExitPlanMode|Glob|Grep|KillBash|KillShell|LS|LSP|ListAgents|ListMcpResourcesTool|NotebookRead|Read|ReadMcpResourceDirTool|ReadMcpResourceTool|ReadNotifications|ReportFindings|ScheduleWakeup|Skill|StructuredOutput|SubagentHandback|TaskCreate|TaskGet|TaskList|TaskOutput|TaskStop|TaskUpdate|TodoRead|TodoWrite|ToolSearch|WaitForMcpServers)$).+$",
         "hooks": [
           {
             "type": "command",

@@ -2,10 +2,13 @@
 //
 // Codex reads checks from hooks.json next to its user settings (~/.codex/hooks.json, or CODEX_HOME),
 // alongside any inline [hooks] in config.toml; every matching check from every file runs (OpenAI,
-// Codex hooks, "Where Codex looks for hooks"). This file adds two entries there, each with no
-// matcher, and leaves every other entry as it was: the check at PreToolUse ("Checking with Aimiru"),
-// which sees every tool call Codex's checks can see, and the person's brief at SessionStart
-// ("Aimiru's brief", ADR-0157), which gives Codex the brief as a session starts and never takes a job.
+// Codex hooks, "Where Codex looks for hooks"). This file adds Aimiru's entries there (ENTRIES), each
+// with no matcher, and leaves every other entry as it was: the check at PreToolUse ("Checking with
+// Aimiru"), which sees every tool call Codex's checks can see; the person's brief at SessionStart
+// ("Aimiru's brief", ADR-0157), which gives Codex the brief as a session starts and never takes a job;
+// and since ADR-0174 the brief again at SubagentStart, and "Aimiru's record" at PostToolUse, Stop,
+// SubagentStop and SessionEnd, which tell Aimiru how each step ended and send what waits, and can
+// never refuse or change anything.
 // Codex keys the person's trust in each to its place (<hooks.json>:<event>:<group>:<handler>), so an
 // install that finds an entry of its own leaves it exactly where it is: unchanged when it is the same,
 // rewritten in place when it changed (Codex asks the person to trust it again), never moved.
@@ -22,10 +25,58 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CODEX_TIMEOUT_S } from './runtime.mjs';
-import { BRIEF_STATUS_MESSAGE, NO_ANSWER_REASON, STATUS_MESSAGE } from './words.mjs';
+import { BRIEF_STATUS_MESSAGE, ENTRY_LABELS, HOOKS_HEADINGS, NO_ANSWER_REASON, RECORD_STATUS_MESSAGE, STATUS_MESSAGE } from './words.mjs';
 
 /** How long Codex lets the brief entry run (ADR-0157): the script itself ends within about 3 s. */
 export const BRIEF_TIMEOUT_S = 10;
+
+/**
+ * How long Codex lets a record entry run in the background (ADR-0174): it never waits on one (async),
+ * and the scripts end themselves sooner (lib/after.mjs).
+ */
+export const RECORD_TIMEOUT_S = 30;
+
+/**
+ * SessionEnd's time limit: Codex runs it while the session closes, always synchronously, 1 s unless
+ * set and never more than 3 s (openai/codex rust-v0.166.0, codex-rs/hooks/src/events/session_end.rs
+ * SESSION_END_MAX_TIMEOUT_SEC; engine/discovery.rs normalize_command_hook). session-end.mjs hands its
+ * work to a detached process and ends at once, so Codex closes without waiting on the network.
+ */
+export const SESSION_END_TIMEOUT_S = 3;
+
+/**
+ * Aimiru's entries in Codex's hooks.json, in the order Codex's /hooks lists their events
+ * (codex-rs/protocol/src/protocol.rs HookEventName, rust-v0.166.0). Each is one handler in a group of
+ * its own with no matcher. name: the doctor's and the trust step's; group: what a person calls it
+ * (ENTRY_LABELS); script: what it runs from the check's copy. Only the check can refuse a step: every
+ * other entry ends 0 and prints nothing but the brief.
+ *   check          PreToolUse     guard.mjs          the check (ADR-0091)
+ *   record         PostToolUse    post-tool-use.mjs  how the step ended (ADR-0174), in the background
+ *   brief          SessionStart   brief.mjs          the person's brief (ADR-0157)
+ *   session_end    SessionEnd     session-end.mjs    sends what waits, from a detached process
+ *   subagent_brief SubagentStart  brief.mjs          the brief, to a subagent (ADR-0174)
+ *   subagent_end   SubagentStop   stop.mjs           sends what waits, in the background
+ *   turn_end       Stop           stop.mjs           sends what waits, in the background
+ */
+export const ENTRIES = Object.freeze([
+  Object.freeze({ name: 'check', group: 'check', event: 'PreToolUse', script: 'guard.mjs' }),
+  Object.freeze({ name: 'record', group: 'record', event: 'PostToolUse', script: 'post-tool-use.mjs' }),
+  Object.freeze({ name: 'brief', group: 'brief', event: 'SessionStart', script: 'brief.mjs' }),
+  Object.freeze({ name: 'session_end', group: 'record', event: 'SessionEnd', script: 'session-end.mjs' }),
+  Object.freeze({ name: 'subagent_brief', group: 'subagent_brief', event: 'SubagentStart', script: 'brief.mjs' }),
+  Object.freeze({ name: 'subagent_end', group: 'record', event: 'SubagentStop', script: 'stop.mjs' }),
+  Object.freeze({ name: 'turn_end', group: 'record', event: 'Stop', script: 'stop.mjs' }),
+]);
+
+/** The entries added with ADR-0174, after the check and the brief. */
+export const RECORD_ENTRIES = Object.freeze(ENTRIES.filter((e) => !['check', 'brief'].includes(e.name)));
+
+/** One of Aimiru's entries by name. */
+export function entryNamed(name) {
+  const e = ENTRIES.find((x) => x.name === name);
+  if (!e) throw new Error(`no entry ${name}`);
+  return e;
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 /** This package's scripts folder (scripts/lib/..). */
@@ -120,7 +171,7 @@ export function isEarlierCopy(command, script) {
 
 /**
  * The data folder (<dot folder>/codex) of an earlier check copy Codex's hooks.json still runs: the
- * first entry of ours, at either event, whose copy is not appDir (isEarlierCopy). Null when there is
+ * first check of ours (PreToolUse, guard.mjs) whose copy is not appDir (isEarlierCopy). Null when there is
  * none, or hooks.json cannot be read. init carries that install's key over and then removes its copy
  * and key (ADR-0164), so nothing is left running, or holding a key, where no check of this release
  * looks.
@@ -133,7 +184,10 @@ export function earlierDataDir({ codexHome, appDir }) {
     return null;
   }
   const here = path.resolve(appDir);
-  for (const [event, script] of [['PreToolUse', 'guard.mjs'], ['SessionStart', 'brief.mjs']]) {
+  // Only the check: every earlier install had it, and its name is this connector's own. The record
+  // entries' names (stop.mjs, post-tool-use.mjs) are too common to carry a key over from (security
+  // review of ADR-0174).
+  for (const [event, script] of [['PreToolUse', 'guard.mjs']]) {
     for (const g of Array.isArray(data.hooks[event]) ? data.hooks[event] : []) {
       for (const h of Array.isArray(g?.hooks) ? g.hooks : []) {
         const command = typeof h?.command === 'string' ? h.command : '';
@@ -179,18 +233,62 @@ export function ourBriefHandler({ nodePath, appDir }) {
 
 /** True for a handler that runs the brief from an Aimiru check copy (this one, or another install's). */
 export function isOurBrief(handler, appDir) {
-  const command = typeof handler?.command === 'string' ? handler.command : '';
-  return command.includes(path.join(appDir, 'brief.mjs')) || isEarlierCopy(command, 'brief.mjs');
+  return isOurScript(handler, appDir, 'brief.mjs');
 }
 
-/** Copies the check (guard, check, its background sender, its library and the shared code) into appDir, replacing an older copy. */
+/** True for a handler that runs `script` from an Aimiru check copy (this one, or another install's). */
+export function isOurScript(handler, appDir, script) {
+  const command = typeof handler?.command === 'string' ? handler.command : '';
+  return command.includes(path.join(appDir, script)) || isEarlierCopy(command, script);
+}
+
+/**
+ * The command Codex runs for a record entry (ADR-0174): the script with this computer's Node.js, both
+ * by full path and with NODE_OPTIONS and NODE_PATH cleared, inside /bin/sh, which always ends 0 and
+ * keeps the script's own errors from Codex's screen, exactly as the brief's (briefCommand). Whatever
+ * happens, Codex carries on as it would have: none of these can refuse or change a step. A record
+ * entry (silent) has its stdout dropped too, so nothing it prints could ever steer a turn, even in a
+ * Codex that ran it synchronously (security review of ADR-0174); the brief to a subagent keeps stdout,
+ * which is how its context reaches the subagent.
+ */
+export function quietCommand({ nodePath, appDir, script, silent = false }) {
+  const out = silent ? '>/dev/null 2>&1' : '2>/dev/null';
+  return `/bin/sh -c '/usr/bin/env -u NODE_OPTIONS -u NODE_PATH ${quote(nodePath)} ${quote(path.join(appDir, script))} ${out}; exit 0'`;
+}
+
+/**
+ * The hooks.json handler this connector owns for one entry (ENTRIES). PostToolUse, Stop and
+ * SubagentStop run in the background (async: Codex never waits on them, and "Background hooks can't
+ * block, approve, rewrite, or otherwise control the operation that triggered them", OpenAI, Codex
+ * hooks, read 3 Nov 2026; codex-rs/hooks/src/engine/mod.rs can_apply_control_effects is false for
+ * them). SessionEnd always runs synchronously, so it gets no async and Codex's 3 s ceiling.
+ * SubagentStart stays synchronous: only then does Codex give the subagent its additionalContext.
+ */
+export function ourEntryHandler(entry, { nodePath, appDir }) {
+  if (entry.name === 'check') return ourHandler({ nodePath, appDir });
+  if (entry.name === 'brief') return ourBriefHandler({ nodePath, appDir });
+  const command = quietCommand({ nodePath, appDir, script: entry.script, silent: entry.name !== 'subagent_brief' });
+  if (entry.name === 'subagent_brief') return { type: 'command', command, timeout: BRIEF_TIMEOUT_S, statusMessage: BRIEF_STATUS_MESSAGE };
+  if (entry.name === 'session_end') return { type: 'command', command, timeout: SESSION_END_TIMEOUT_S, statusMessage: RECORD_STATUS_MESSAGE };
+  return { type: 'command', command, timeout: RECORD_TIMEOUT_S, async: true, statusMessage: RECORD_STATUS_MESSAGE };
+}
+
+/** True for a handler at `entry`'s event that this connector wrote (any copy, any version). */
+export function isOurEntry(entry, handler, appDir) {
+  return isOurScript(handler, appDir, entry.script);
+}
+
+/** The scripts the copy holds: every entry's, the check and its background sender. */
+const APP_SCRIPTS = ['guard.mjs', 'pre-tool-use.mjs', 'background.mjs', 'brief.mjs', 'post-tool-use.mjs', 'stop.mjs', 'session-end.mjs'];
+
+/** Copies the check (guard, check, its background sender, the other entries' scripts, its library and the shared code) into appDir, replacing an older copy. */
 export function copyApp(appDir, { from = SCRIPTS_DIR } = {}) {
   const parent = path.dirname(appDir);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const next = `${appDir}.next-${process.pid}`;
   fs.rmSync(next, { recursive: true, force: true });
   fs.mkdirSync(next, { recursive: true, mode: 0o700 });
-  for (const name of ['guard.mjs', 'pre-tool-use.mjs', 'background.mjs', 'brief.mjs']) fs.copyFileSync(path.join(from, name), path.join(next, name));
+  for (const name of APP_SCRIPTS) fs.copyFileSync(path.join(from, name), path.join(next, name));
   for (const dir of ['lib', 'vendor']) {
     fs.mkdirSync(path.join(next, dir), { recursive: true, mode: 0o700 });
     for (const f of fs.readdirSync(path.join(from, dir))) {
@@ -277,23 +375,27 @@ function placed(groups, handler, mine) {
 }
 
 /**
- * Adds Aimiru's two entries to Codex's hooks.json, or brings them up to date where they are: the check
- * at PreToolUse and the brief at SessionStart (ADR-0157). Keeps every other entry where it is, and a
- * dated copy of the file before changing it. An install that changes nothing writes nothing.
+ * Adds Aimiru's entries (ENTRIES) to Codex's hooks.json, or brings them up to date where they are: the
+ * check at PreToolUse, the brief at SessionStart (ADR-0157), and since ADR-0174 the record at
+ * PostToolUse, Stop, SubagentStop and SessionEnd and the brief at SubagentStart. Keeps every other
+ * entry where it is, and a dated copy of the file before changing it. An install that changes nothing
+ * writes nothing.
  * @returns {{file, changed: boolean, replaced: boolean, backup: string|null, groupIndex: number,
- *   handlerIndex: number, command: string, brief: {groupIndex: number, handlerIndex: number, command: string, replaced: boolean}}}
+ *   handlerIndex: number, command: string, brief: {groupIndex: number, handlerIndex: number, command: string, replaced: boolean},
+ *   entries: Record<string, {event: string, groupIndex: number, handlerIndex: number, command: string, replaced: boolean}>}}
  */
 export function installHook({ codexHome, appDir, nodePath, now = new Date() }) {
   const file = hooksFileOf(codexHome);
   const { exists, data } = readHooksFile(file);
-  const handler = ourHandler({ nodePath, appDir });
-  const briefHandler = ourBriefHandler({ nodePath, appDir });
-  const check = placed(data.hooks.PreToolUse, handler, (h) => isOurs(h, appDir));
-  const brief = placed(data.hooks.SessionStart, briefHandler, (h) => isOurBrief(h, appDir));
-  const before = JSON.stringify([data.hooks.PreToolUse ?? null, data.hooks.SessionStart ?? null]);
-  data.hooks.PreToolUse = check.groups;
-  data.hooks.SessionStart = brief.groups;
-  const changed = JSON.stringify([data.hooks.PreToolUse, data.hooks.SessionStart]) !== before;
+  const before = JSON.stringify(ENTRIES.map((e) => data.hooks[e.event] ?? null));
+  const entries = {};
+  for (const entry of ENTRIES) {
+    const handler = ourEntryHandler(entry, { nodePath, appDir });
+    const at = placed(data.hooks[entry.event], handler, (h) => isOurEntry(entry, h, appDir));
+    data.hooks[entry.event] = at.groups;
+    entries[entry.name] = { event: entry.event, groupIndex: at.groupIndex, handlerIndex: at.handlerIndex, command: handler.command, replaced: at.found };
+  }
+  const changed = JSON.stringify(ENTRIES.map((e) => data.hooks[e.event])) !== before;
   let backup = null;
   if (changed) {
     if (exists) {
@@ -302,32 +404,37 @@ export function installHook({ codexHome, appDir, nodePath, now = new Date() }) {
     }
     writeAtomic(file, `${JSON.stringify(data, null, 2)}\n`);
   }
+  const { check, brief } = entries;
   return {
     file,
     changed,
-    replaced: check.found,
+    replaced: check.replaced,
     backup,
     groupIndex: check.groupIndex,
     handlerIndex: check.handlerIndex,
-    command: handler.command,
-    brief: { groupIndex: brief.groupIndex, handlerIndex: brief.handlerIndex, command: briefHandler.command, replaced: brief.found },
+    command: check.command,
+    brief: { groupIndex: brief.groupIndex, handlerIndex: brief.handlerIndex, command: brief.command, replaced: brief.replaced },
+    entries,
   };
 }
 
-/** Takes Aimiru's entries (the check and the brief) out of Codex's hooks.json; nothing else. */
+/** Takes Aimiru's entries (ENTRIES) out of Codex's hooks.json; nothing else. */
 export function uninstallHook({ codexHome, appDir }) {
   const file = hooksFileOf(codexHome);
   const { exists, data } = readHooksFile(file);
   if (!exists) return { file, removed: 0 };
-  const check = withoutOurs(data.hooks.PreToolUse, (h) => isOurs(h, appDir));
-  const brief = withoutOurs(data.hooks.SessionStart, (h) => isOurBrief(h, appDir));
-  const removed = check.removed + brief.removed;
-  if (!removed) return { file, removed: 0 };
-  for (const [event, left] of [['PreToolUse', check], ['SessionStart', brief]]) {
-    if (!left.removed) continue;
-    if (left.groups.length) data.hooks[event] = left.groups;
+  const left = new Map();
+  for (const entry of ENTRIES) {
+    left.set(entry.event, withoutOurs(left.get(entry.event)?.groups ?? data.hooks[entry.event], (h) => isOurEntry(entry, h, appDir)));
+  }
+  let removed = 0;
+  for (const [event, l] of left) {
+    if (!l.removed) continue;
+    removed += l.removed;
+    if (l.groups.length) data.hooks[event] = l.groups;
     else delete data.hooks[event];
   }
+  if (!removed) return { file, removed: 0 };
   writeAtomic(file, `${JSON.stringify(data, null, 2)}\n`);
   return { file, removed };
 }
@@ -390,6 +497,57 @@ export function findOurHook({ codexHome, appDir }) {
 /** Where our brief entry sits in hooks.json now (ADR-0157), in the same shape. */
 export function findOurBrief({ codexHome, appDir }) {
   return findIn({ codexHome, event: 'SessionStart', mine: (h) => isOurBrief(h, appDir) });
+}
+
+/** Where one of Aimiru's entries (ENTRIES) sits in hooks.json now, in the same shape. */
+export function findOurEntry({ codexHome, appDir, entry }) {
+  return findIn({ codexHome, event: entry.event, mine: (h) => isOurEntry(entry, h, appDir) });
+}
+
+/** True only for the entry exactly as install writes it: no matcher, and the handler equal to ours for the Node.js it names. */
+export function isOurExactEntry(at, appDir, entry) {
+  if (!at?.present || at.matcher !== null) return false;
+  const nodePath = briefNodePath(at.command);
+  if (!nodePath) return false;
+  return canonical(at.handler) === canonical(ourEntryHandler(entry, { nodePath, appDir }));
+}
+
+/**
+ * Each of Aimiru's entries as Codex holds it now (ADR-0174), in the order /hooks lists them:
+ * {entry, at, exact, state, off, label, heading}. state: trusted, untrusted, changed, unknown (Codex's
+ * settings could not be read) or missing (not in hooks.json); an entry that is not exactly as install
+ * writes it reads as changed, since Codex skips it until the install line runs again and it is trusted.
+ */
+export function entriesTrust({ codexHome, appDir }) {
+  return ENTRIES.map((entry) => {
+    const at = findOurEntry({ codexHome, appDir, entry });
+    const exact = isOurExactEntry(at, appDir, entry);
+    const trust = entryTrust({ codexHome, at, event: entry.event });
+    const state = !at.present ? 'missing' : !exact ? 'changed' : trust.state;
+    return { entry, at, exact, state, off: trust.off, ...namesOf(entry) };
+  });
+}
+
+/** What the person calls an entry and the heading /hooks lists it under. */
+function namesOf(entry) {
+  return { label: ENTRY_LABELS[entry.group === 'subagent_brief' ? 'brief' : entry.group], heading: HOOKS_HEADINGS[entry.event] };
+}
+
+/**
+ * Every one of Aimiru's entries as waiting for the person's trust, state unknown: what the trust step
+ * names when Codex's files could not be read, so it never says there is nothing to do.
+ */
+export function allWaiting() {
+  return ENTRIES.map((entry) => ({ entry, at: null, exact: false, state: 'unknown', off: false, ...namesOf(entry) }));
+}
+
+/**
+ * The entries the person still has to trust in /hooks (ADR-0174): every one Codex would skip now
+ * because it has no trust for it, or the trust it kept is for an earlier version, or its settings
+ * could not be read. A missing entry is the install line's to put back, never the person's to trust.
+ */
+export function waitingForTrust(list) {
+  return list.filter((x) => x.state !== 'trusted' && x.state !== 'missing');
 }
 
 // ---------------------------------------------------------------------------
@@ -643,8 +801,32 @@ export function codexSettingsFacts({ codexHome, hookKey = null }) {
   return { file, read: true, checksOff, turnedOff };
 }
 
-/** Codex's names for the two events in its settings keys (openai/codex codex-rs/hooks/src/lib.rs hook_event_key_label). */
-export const EVENT_KEYS = Object.freeze({ PreToolUse: 'pre_tool_use', SessionStart: 'session_start' });
+/**
+ * Codex's names for Aimiru's events in its settings keys (openai/codex codex-rs/hooks/src/lib.rs
+ * hook_event_key_label, rust-v0.166.0).
+ */
+export const EVENT_KEYS = Object.freeze({
+  PreToolUse: 'pre_tool_use',
+  PostToolUse: 'post_tool_use',
+  SessionStart: 'session_start',
+  SessionEnd: 'session_end',
+  SubagentStart: 'subagent_start',
+  SubagentStop: 'subagent_stop',
+  Stop: 'stop',
+});
+
+/**
+ * The events whose matcher Codex reads (codex-rs/hooks/src/events/common.rs matcher_pattern_for_event,
+ * rust-v0.166.0); any other event's matcher is dropped before the hash, so it never counts in it.
+ */
+const EVENTS_WITH_MATCHERS = new Set(['PreToolUse', 'PermissionRequest', 'PostToolUse', 'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact']);
+
+/**
+ * The events that can give the model context: Codex keeps additionalContextLimit only for these and
+ * drops it from every other entry before the hash (codex-rs/hooks/src/engine/discovery.rs
+ * append_matcher_groups, rust-v0.166.0).
+ */
+const EVENTS_WITH_CONTEXT = new Set(['PreToolUse', 'PostToolUse', 'SessionStart', 'UserPromptSubmit', 'SubagentStart']);
 
 /** Codex's key for an entry's trust and on/off state (openai/codex codex-rs/hooks/src/lib.rs hook_key). */
 export function hookKeyOf(hooksFile, groupIndex, handlerIndex = 0, event = 'PreToolUse') {
@@ -669,18 +851,26 @@ function sortedDeep(v) {
  * only when set to anything but 2,500 (openai/codex rust-v0.165.0: codex-rs/hooks/src/engine/discovery.rs
  * hook_hash and normalize_command_hook, codex-rs/config/src/fingerprint.rs version_for_toml). It matched
  * the hashes Codex 0.165.0 wrote when the person trusted two entries on 28 Oct (test/brief.test.mjs).
- * Null for a handler that is not a command.
+ * Read again at rust-v0.166.0 for ADR-0174 (3 Nov 2026), which adds: SessionEnd's timeout is 1 s unless
+ * set and at most 3 s; additionalContextLimit counts only at the events that can give context; and the
+ * matcher counts only at the events whose matcher Codex reads. Null for a handler that is not a command.
  */
 export function codexHookHash(event, handler, matcher = null) {
   if (!handler || handler.type !== 'command' || typeof handler.command !== 'string') return null;
-  const timeout = Number.isInteger(handler.timeout) && handler.timeout > 0 ? handler.timeout : Number.isInteger(handler.timeout) ? 1 : 600;
+  const set = Number.isInteger(handler.timeout) && handler.timeout >= 0 ? handler.timeout : null;
+  const timeout =
+    event === 'SessionEnd' || event === 'Interrupt'
+      ? Math.min(Math.max(set ?? 1, 1), 3)
+      : set !== null
+        ? Math.max(set, 1)
+        : 600;
   const normal = { type: 'command', command: handler.command, timeout, async: handler.async === true };
   if (typeof handler.statusMessage === 'string') normal.statusMessage = handler.statusMessage;
-  if (Number.isInteger(handler.additionalContextLimit) && handler.additionalContextLimit >= 0 && handler.additionalContextLimit !== DEFAULT_CONTEXT_LIMIT) {
+  if (EVENTS_WITH_CONTEXT.has(event) && Number.isInteger(handler.additionalContextLimit) && handler.additionalContextLimit >= 0 && handler.additionalContextLimit !== DEFAULT_CONTEXT_LIMIT) {
     normal.additionalContextLimit = handler.additionalContextLimit;
   }
   const identity = { event_name: EVENT_KEYS[event] ?? event, hooks: [normal] };
-  if (typeof matcher === 'string') identity.matcher = matcher;
+  if (typeof matcher === 'string' && EVENTS_WITH_MATCHERS.has(event)) identity.matcher = matcher;
   return `sha256:${createHash('sha256').update(JSON.stringify(sortedDeep(identity)), 'utf8').digest('hex')}`;
 }
 

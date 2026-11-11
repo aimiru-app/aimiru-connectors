@@ -1,7 +1,7 @@
 // Shared plumbing for the Aimiru for Claude Code scripts: settings, stdin, local state, versions.
 
 import { spawnSync } from 'node:child_process';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,7 +15,7 @@ import { ASK_HOLD_MS, createPauseMemory, createAimiruClient, installSource, sett
 import { CLAUDE_CODE_CONNECT } from '../vendor/messages.mjs';
 
 export const CONNECTOR = 'claude-code';
-export const VERSION = '0.3.0-rc.4';
+export const VERSION = '0.3.0-rc.5';
 /** onFailure: "block" makes a failed or timed-out check block the call (Claude Code 2.1.295, CHANGELOG). */
 export const MIN_ENFORCED_VERSION = '2.1.295';
 export const AGENT_LABEL = 'Claude Code';
@@ -38,6 +38,29 @@ export function fitContext(withBrief) {
   const full = withBrief(true);
   if (full.length <= CONTEXT_MAX_CHARS) return { text: full, brief: true };
   return { text: withBrief(false), brief: false };
+}
+
+/** The most the person's brief may take as a session or a subagent starts (ADR-0157, ADR-0174): Claude Code waits for it. */
+export const BRIEF_START_MS = 2_000;
+
+/**
+ * Asks Aimiru for the person's brief as a session or a subagent starts (GET /v1/brief, at most
+ * BRIEF_START_MS): Aimiru's raw answer, or null when none came. briefOf (vendor/aimiru-client.mjs)
+ * says what it holds. Never throws, so a start goes on whatever happens.
+ */
+export function askForBrief(client, { timeoutMs = BRIEF_START_MS } = {}) {
+  return client.brief({ timeoutMs }).catch(() => null);
+}
+
+/**
+ * The brief alone as a context for Claude (a subagent, P2.9), exactly as Aimiru wrote it, or null when
+ * there is none to give: it was not given (empty, not open to this agent, paused, an error), or it
+ * would not fit CONTEXT_MAX_CHARS, in which case it is left out whole, never cut (fitContext).
+ */
+export function briefAloneContext(brief) {
+  if (brief?.state !== 'given' || typeof brief.text !== 'string' || brief.text === '') return null;
+  const context = fitContext((withBrief) => (withBrief ? brief.text : ''));
+  return context.brief ? context.text : null;
 }
 
 /**
@@ -586,6 +609,12 @@ function writeJsonFile(file, obj) {
  * Aimiru's own words about the question, kept with it for the retry, are covered too, so nothing
  * written to the folder is shown to Claude as Aimiru's (a file saved before they were kept has none).
  */
+/** A MAC over an answer kept for twins: its own key domain, the step, the question, its programs and when it was kept. */
+function answeredMac(secret, fp, data, ts) {
+  const programs = Array.isArray(data.programs) ? JSON.stringify(data.programs) : '';
+  return createHmac('sha256', `aimiru-answered:${secret}`).update(`${fp}\n${data.exceptionId}\n${data.actionId ?? ''}\n${programs}\n${data.claim ?? ''}\n${ts}`).digest('hex');
+}
+
 function pendingMac(secret, fp, data) {
   const words = typeof data.explain === 'string' && data.explain ? `\n${data.explain}` : '';
   // The programs the question was about (ADR-0090 review): a yes is for them, by their content.
@@ -646,9 +675,16 @@ function macEqual(a, b) {
 /** How long a store's cart is remembered for its complete_checkout (ADR-0065). */
 export const CART_TTL_MS = 60 * 60_000;
 
+/** A claim on a step's ask older than this belongs to a process that died. */
+export const ASK_CLAIM_STALE_MS = 30_000;
+
 export function stateStore(dataDir, { secret = '' } = {}) {
   const callsDir = path.join(dataDir, 'calls');
   const pendingDir = path.join(dataDir, 'pending');
+  // One small file per step being asked about right now (askClaim): a twin of it waits for that ask.
+  const askingDir = path.join(dataDir, 'asking');
+  const askingFile = (fp) => path.join(askingDir, `${safeName(fp)}.lock`);
+  const myClaims = new Map();
   // One small file per waiting question, by its exception id (ADR-0094): which call it was, so a
   // session start can ask Aimiru about this computer's own questions only.
   const indexDir = path.join(dataDir, 'pending-index');
@@ -663,6 +699,7 @@ export function stateStore(dataDir, { secret = '' } = {}) {
   const programFile = (session, file) => path.join(programsDir, `${sha256Hex(`program:${String(session ?? '')}\u0000${String(file ?? '')}`).slice(0, 40)}.json`);
   const healthFile = path.join(dataDir, 'health.json');
   const statusFile = path.join(dataDir, 'status.json');
+  const subagentBriefFile = path.join(dataDir, 'subagent-brief.json');
   // Per session (ADR-0157): the brief it was given (its version, never its words), and the job it took.
   const briefsDir = path.join(dataDir, 'briefs');
   const briefFile = (session) => path.join(briefsDir, `${sha256Hex(`brief:${String(session ?? '')}`).slice(0, 40)}.json`);
@@ -770,6 +807,102 @@ export function stateStore(dataDir, { secret = '' } = {}) {
         // ignore
       }
       return v;
+    },
+    /**
+     * One ask at a time for one step (same session, tool and input: fingerprint). Claude Code runs
+     * steps side by side, so twins of one step can be checked in the same moment, before the first
+     * has kept its question; the first to claim asks, the others wait for its question and reuse it
+     * (waitForTwin). A claim older than ASK_CLAIM_STALE_MS is a process that died, and is taken over.
+     * Returns true when this process now holds the claim (or the folder cannot say: never blocks).
+     */
+    claimAsk(fp) {
+      if (myClaims.has(fp)) return true;
+      const file = askingFile(fp);
+      const token = randomUUID();
+      try {
+        fs.mkdirSync(askingDir, { recursive: true, mode: 0o700 });
+        for (let tries = 0; tries < 2; tries += 1) {
+          try {
+            fs.writeFileSync(file, token, { flag: 'wx', mode: 0o600 });
+            myClaims.set(fp, token);
+            // An answer kept for an earlier ask of this step is not this ask's.
+            fs.rmSync(path.join(askingDir, `${safeName(fp)}.answered.json`), { force: true });
+            return true;
+          } catch (err) {
+            if (err?.code !== 'EEXIST') return true;
+            let age = 0;
+            try {
+              age = Date.now() - fs.statSync(file).mtimeMs;
+            } catch {
+              continue; // gone meanwhile: claim again
+            }
+            if (age < ASK_CLAIM_STALE_MS) return false;
+            try {
+              fs.rmSync(file, { force: true });
+            } catch {
+              return true;
+            }
+          }
+        }
+        return false;
+      } catch {
+        return true;
+      }
+    },
+    /**
+     * The answer the person gave while the first process held the step (ADR-0145), for the twins that
+     * wait on it: only which question it was (exceptionId), signed like a waiting question. A twin
+     * still asks Aimiru about that question before it uses it, so a file never makes a yes.
+     */
+    putAnswered(fp, data) {
+      if (!secret || typeof data?.exceptionId !== 'string') return;
+      try {
+        const ts = Date.now();
+        // Bound to the claim this process holds on the step: an answer kept for an earlier ask is not this one's.
+        const claim = data.claim ?? myClaims.get(fp) ?? '';
+        const kept = { ...data, claim };
+        writeJsonFile(path.join(askingDir, `${safeName(fp)}.answered.json`), { ...kept, ts, mac: answeredMac(secret, fp, kept, ts) });
+      } catch {
+        // the twins ask again instead
+      }
+    },
+    /** That answer's question, when it is signed, was kept since `since` (ms) and is under 20 s old. */
+    getAnswered(fp, since = 0, claim = null) {
+      const v = readJsonFile(path.join(askingDir, `${safeName(fp)}.answered.json`));
+      if (!v || !secret || !Number.isFinite(v.ts) || !macEqual(v.mac, answeredMac(secret, fp, v, v.ts))) return null;
+      // Not from the future, not older than the twin's wait, not older than 20 s.
+      if (v.ts < since || v.ts > Date.now() + 1_000 || Date.now() - v.ts > 20_000) return null;
+      // Only the answer of the ask the twin is waiting on, never an older one for another question.
+      if (claim !== null && v.claim !== claim) return null;
+      return v;
+    },
+    /** The token of the claim now held on this step's ask (by whichever process), or null. */
+    claimToken(fp) {
+      try {
+        if (Date.now() - fs.statSync(askingFile(fp)).mtimeMs >= ASK_CLAIM_STALE_MS) return null;
+        return fs.readFileSync(askingFile(fp), 'utf8') || null;
+      } catch {
+        return null;
+      }
+    },
+    /** True while another process holds a fresh claim on this step's ask. */
+    askClaimed(fp) {
+      try {
+        return Date.now() - fs.statSync(askingFile(fp)).mtimeMs < ASK_CLAIM_STALE_MS;
+      } catch {
+        return false;
+      }
+    },
+    /** Ends this process's claim on a step's ask (never another process's). */
+    releaseAsk(fp) {
+      const token = myClaims.get(fp);
+      if (!token) return;
+      myClaims.delete(fp);
+      try {
+        if (fs.readFileSync(askingFile(fp), 'utf8') === token) fs.rmSync(askingFile(fp), { force: true });
+      } catch {
+        // a claim left behind goes stale on its own
+      }
     },
     /** An ask that timed out: the same call later waits on the same question instead of asking again. */
     putPending(fp, data) {
@@ -911,6 +1044,21 @@ export function stateStore(dataDir, { secret = '' } = {}) {
       return readJsonFile(statusFile);
     },
     /**
+     * When a subagent last started here and what came of its brief (P2.9), never the brief's words.
+     * A file of its own, so parallel subagents and a session's own status never overwrite each other.
+     */
+    noteSubagentBrief(state, at = new Date().toISOString()) {
+      try {
+        writeJsonFile(subagentBriefFile, { subagent_brief_ran_at: at, subagent_brief_state: String(state ?? 'none') });
+      } catch {
+        // a disk that keeps nothing never costs the subagent its brief
+      }
+    },
+    subagentBrief() {
+      const v = readJsonFile(subagentBriefFile);
+      return v && typeof v.subagent_brief_ran_at === 'string' ? { ranAt: v.subagent_brief_ran_at, state: typeof v.subagent_brief_state === 'string' ? v.subagent_brief_state : 'none' } : null;
+    },
+    /**
      * The person allowed these programs in this session (ADR-0090): the same file with the same
      * content then runs as local work for the rest of the session. Signed with the Aimiru key.
      */
@@ -991,8 +1139,12 @@ export function stateStore(dataDir, { secret = '' } = {}) {
 export function fingerprint(input) {
   const ti = input?.tool_input && typeof input.tool_input === 'object' ? { ...input.tool_input } : {};
   delete ti.description;
-  const what = ['Bash', 'PowerShell', 'Monitor'].includes(input?.tool_name) && typeof ti.command === 'string' ? { command: ti.command } : ti;
-  return sha256Hex(`${input?.session_id ?? ''}\n${input?.tool_name ?? ''}\n${JSON.stringify(what)}`).slice(0, 40);
+  // A run outside Claude Code's sandbox is not the same step as one inside it.
+  const what = ['Bash', 'PowerShell', 'Monitor'].includes(input?.tool_name) && typeof ti.command === 'string'
+    ? { command: ti.command, ...(ti.dangerouslyDisableSandbox ? { dangerouslyDisableSandbox: true } : {}) }
+    : ti;
+  // A helper (agent_id) or a step run from another folder (cwd) is not the same step as the parent's.
+  return sha256Hex(`${input?.session_id ?? ''}\n${input?.tool_name ?? ''}\n${JSON.stringify(what)}\n${input?.agent_id ?? ''}\n${input?.cwd ?? ''}`).slice(0, 40);
 }
 
 // ---------------------------------------------------------------------------

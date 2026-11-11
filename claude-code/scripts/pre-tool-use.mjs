@@ -78,6 +78,8 @@ const PAUSE_RESERVE_MS = 3_000;
 const ANSWER_RESERVE_MS = 3_000;
 /** A retry of the same call looks at its open question once, for at most this long (ADR-0145). */
 const RETRY_LOOK_MS = 1_500;
+/** A twin of a step being asked about waits at most this long for that ask to keep its question. */
+const TWIN_WAIT_MS = 8_000;
 /** A call's input is kept with its waiting question, for a late yes, only up to this size. */
 const KEPT_INPUT_MAX = 64 * 1024;
 /** A step paused again after each Resume this many times is refused, never let through. */
@@ -246,6 +248,39 @@ function runOf(input, projectDir) {
   return { id: input.session_id, label };
 }
 
+/**
+ * Waits for the question another process is asking about this same step (store.claimAsk): until it
+ * has kept the question (returned), or let go of the claim without one (null: it was allowed or
+ * refused, so this check decides on its own), or ms ran out (null: the ask goes ahead, never a yes).
+ */
+async function waitForTwin(store, fp, ms) {
+  const since = Date.now() - 1_000;
+  // The ask this twin waits on: whoever holds the claim now. An answer kept for another one is refused.
+  const claim = store.claimToken(fp);
+  if (claim === null) return null;
+  const until = Date.now() + ms;
+  for (;;) {
+    let pending = null;
+    try {
+      pending = store.getPending(fp);
+    } catch {
+      pending = null;
+    }
+    if (pending?.exceptionId) return pending;
+    // The first process got the person's answer while it held the step: this twin looks at that same
+    // question once (the retry path asks Aimiru for its answer), so it is not asked again.
+    let answered = null;
+    try {
+      answered = store.getAnswered(fp, since, claim);
+    } catch {
+      answered = null;
+    }
+    if (answered?.exceptionId) return answered;
+    if (!store.askClaimed(fp) || Date.now() >= until) return null;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function main() {
   let input;
   try {
@@ -314,7 +349,16 @@ async function main() {
       // check (quality review of wk/connectors-flow).
       store.markUp();
     }
-    const outcome = await checkStep({ input, toolName, settings, store, client, holdOn });
+    let outcome;
+    try {
+      outcome = await checkStep({ input, toolName, settings, store, client, holdOn });
+    } finally {
+      try {
+        store.releaseAsk(fingerprint(input));
+      } catch {
+        // a claim left behind goes stale on its own
+      }
+    }
     if (outcome !== 'paused') return;
   }
   // Paused again after every Resume: refused, never let through.
@@ -523,12 +567,21 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
       }
     }
 
+    // One ask for one step (same session, tool and input): a twin checked in the same moment waits
+    // for the first one's question and reuses it, instead of asking the person a second time. The
+    // claim is released by main once this check is over.
+    if (!pending?.exceptionId && !store.claimAsk(fp)) {
+      const twin = await waitForTwin(store, fp, Math.max(0, Math.min(TWIN_WAIT_MS, left() - ANSWER_RESERVE_MS - PAUSE_RESERVE_MS - RETRY_LOOK_MS)));
+      if (twin?.exceptionId && sameKeys(twin.programs, askedAbout)) pending = twin;
+      else if (twin) store.deletePending(fp);
+    }
+
     // A yes is used only for programs known by their content and unchanged since the question.
     const yesCovers = () => !askedAbout.length || (fullyKnown(askedAbout) && unchangedSinceAsked());
     if (pending?.exceptionId) {
       // The same call tried again (ADR-0145): one look at its question, never a second question. It
       // also tells Aimiru this computer is not waiting on it (waiting_s=0).
-      const answer = await client.approvalNow(pending.exceptionId, { timeoutMs: Math.max(250, Math.min(RETRY_LOOK_MS, left() - PAUSE_RESERVE_MS)) });
+      const answer = await client.approvalNow(pending.exceptionId, { timeoutMs: Math.max(250, Math.min(RETRY_LOOK_MS, left() - PAUSE_RESERVE_MS)), relayWhy: true });
       if (answer.status === 'allowed' && yesBeforeLastPause(watch, answer.answeredAt)) {
         // A yes given before a Pause is never used after it (ADR-0035, ADR-0142): asked again below.
         store.deletePending(fp);
@@ -564,7 +617,9 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
         return;
       } else if (answer.status === 'waiting') {
         // Still open: refused again, and nothing is asked a second time.
-        deny(MESSAGES.askStillOpen(clockOf(pending.expiresAt ?? null), AGENT_LABEL));
+        // The person asked why (ADR-0201): Aimiru's fixed question goes with the refusal, until answered.
+        const why = answer.whyAsked && !answer.whyAsked.answered ? ` ${MESSAGES.whyAsked(pending.exceptionId, { tool: true })}` : '';
+        deny(`${MESSAGES.askStillOpen(clockOf(pending.expiresAt ?? null), AGENT_LABEL)}${why}`);
         return;
       } else store.deletePending(fp); // expired: ask again below
     }
@@ -586,6 +641,8 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
       context.native_prompt = native.native_prompt;
       if (native.estimated) context.native_prompt_estimated = true;
     }
+    // Held from here on (a question asked again after an old one ended is still one ask).
+    store.claimAsk(fp);
     const d = await client.decide(action, {
       context,
       deadlineMs: deadline,
@@ -628,6 +685,9 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
       outcome: answer.status === 'waiting' ? 'open' : answer.status,
       ...(plan.quiet ? { quiet: true } : {}),
     });
+    if (answer.status === 'allowed' || (answer.status === 'denied' && answer.reason !== 'paused')) {
+      store.putAnswered(fp, { exceptionId: d.exceptionId, actionId: d.actionId ?? null, ...(askedAbout.length ? { programs: askedAbout } : {}) });
+    }
     if (answer.status === 'allowed' && askedAbout.length && !unchangedSinceAsked()) {
       // The file changed while the person was asked: the yes was for what they were shown.
       deny(MESSAGES.programChanged);

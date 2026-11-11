@@ -90,6 +90,9 @@ export const RUNNER_WORDS = Object.freeze({
   // What the runner writes down on the computer (its log and status file): never the job's words.
   tookJob: (label) => `${label} took a job you gave it in Aimiru. Aimiru shows its words and each step.`,
   jobEnded: (label, outcome) => (outcome === 'completed' ? `${label} finished the job.` : `${label} did not finish the job. Aimiru says why, with the job.`),
+  // A job whose step needs the person's yes waits for the answer, then goes on once (ADR-0172).
+  jobWaits: (label) => `${label} is waiting for your answer in Aimiru, and goes on with the job once you answer.`,
+  goesOn: (label) => `${label} goes on with a job you answered in Aimiru.`,
   notYours: (label) => `${label} was offered work you did not give it, and handed it back unrun.`,
   cannotStart: (label, why) => `${label} took a job but cannot start it. ${why}`,
   stopping: 'Stopping. A job that is running is stopped and recorded.',
@@ -420,6 +423,12 @@ export function waitFor(ms, stop, sleep) {
  * The runner: one loop per agent, each looking for that agent's job every POLL_MS, at most one job
  * at a time per agent. Each agent is a connector's own take path (scripts/lib/runner-agent.mjs):
  *   {connector, label, ready(dir) -> {ok, text?}, client -> {takeTask, record}, run({task, dir, print, stop, spawn})}
+ * A take path may also keep a job open while its questions wait for the person (ADR-0172): its run
+ * then resolves to {outcome: 'waiting'}, and it gives nextResume() -> due or null, and
+ * resume({due, dir, print, stop, spawn, started}) -> {outcome}, which goes on with that job once and
+ * calls started() once its own checks pass, or resolves to {outcome: 'skipped'} without it. The runner
+ * asks nextResume only where Aimiru's door has just answered with no Pause (a 423 never reaches it),
+ * the runner on and the agent's switch on; one without them runs exactly as before.
  * @param {object} o
  * @param {object[]} o.agents @param {string} o.dir @param {string} o.runnerId @param {string} o.device
  * @param {(line: string) => void} [o.print] @param {AbortSignal} [o.stop]
@@ -528,6 +537,13 @@ export function createRunner(o) {
           await waitFor(NOT_READY_MS, stop, o.sleep);
           continue;
         } else say('waiting', RUNNER_WORDS.ready(agent.label));
+        // A job of this agent's whose questions the person has answered goes on now (ADR-0172): only
+        // here, where the door just answered with no Pause, the runner on and nothing held back.
+        if (!data.why && (await resumeDue(agent))) {
+          said = null;
+          ready = null;
+          continue;
+        }
         await waitFor(pace, stop, o.sleep);
         continue;
       }
@@ -567,14 +583,23 @@ export function createRunner(o) {
     // (runner security review: nothing on the computer keeps a job's words or a command's text).
     print(toLog ? RUNNER_WORDS.tookJob(agent.label) : RUNNER_WORDS.taken(agent.label, printable(task.description)));
     setState(agent, 'running', RUNNER_WORDS.tookJob(agent.label));
-    // While it runs, Aimiru still shows the runner on: a busy word every BUSY_PING_MS, which takes
-    // nothing (only to a door that knows runners; an older door would read it as a take).
+    // Into the log, nothing the run prints: its notes name commands and files, and its last lines
+    // are the result.
+    const done = await runWithPings(agent, () => agent.run({ task, dir: o.dir, print: toLog ? () => {} : print, stop, spawn }));
+    sayEnding(agent, done);
+  }
+
+  /**
+   * Starts a run and, while it goes, tells Aimiru the runner is still on: a busy word every
+   * BUSY_PING_MS, which takes nothing (only to a door that knows runners; an older door would read
+   * it as a take). Resolves to what the run resolved to.
+   */
+  async function runWithPings(agent, start) {
     const ended = new AbortController();
-    // The job starts first; the pings follow it. Into the log, nothing the run prints: its notes
-    // name commands and files, and its last lines are the result.
+    // The run starts first; the pings follow it.
     let running;
     try {
-      running = Promise.resolve(agent.run({ task, dir: o.dir, print: toLog ? () => {} : print, stop, spawn })).catch(() => {});
+      running = Promise.resolve(start()).catch(() => {});
     } catch {
       // The connector's run records its own end; a throw here means it could not even start.
       running = Promise.resolve();
@@ -593,10 +618,55 @@ export function createRunner(o) {
     const done = await running;
     ended.abort();
     await pings;
-    // How it ended, in the runner's own words: never the result's.
+    return done;
+  }
+
+  /** How a run ended, in the runner's own words (never the result's): waiting, finished or not. */
+  function sayEnding(agent, done) {
+    // Not gone on after all (paused at the last look): the job still waits, and nothing is said twice.
+    if (done?.outcome === 'skipped') {
+      setState(agent, 'waiting_for_answer', RUNNER_WORDS.jobWaits(agent.label));
+      return;
+    }
+    if (done?.outcome === 'waiting') {
+      const waits = RUNNER_WORDS.jobWaits(agent.label);
+      if (toLog) print(waits);
+      setState(agent, 'waiting_for_answer', waits);
+      return;
+    }
     const ending = RUNNER_WORDS.jobEnded(agent.label, done?.outcome);
     if (toLog) print(ending);
     setState(agent, done?.outcome === 'completed' ? 'finished' : 'not_finished', ending);
+  }
+
+  /**
+   * A job of this agent's that waited for the person's answers and is due to go on (ADR-0172): asked
+   * of the agent's own take path, which reads its own signed record of the job and Aimiru's answers.
+   * Goes on once, through the same path as a new job, after the check is asked again. Resolves to
+   * true when it went on.
+   */
+  async function resumeDue(agent) {
+    if (typeof agent.nextResume !== 'function' || typeof agent.resume !== 'function') return false;
+    let due = null;
+    try {
+      due = await agent.nextResume();
+    } catch {
+      due = null;
+    }
+    if (!due || stop.aborted) return false;
+    // Asked again before it goes on: the check may have changed since the last look.
+    if (!safeReady(agent, o.dir).ok) return false;
+    // Said only once the take path has passed its own checks, just before the agent starts.
+    let announced = false;
+    const started = () => {
+      if (announced) return;
+      announced = true;
+      print(RUNNER_WORDS.goesOn(agent.label));
+      setState(agent, 'running', RUNNER_WORDS.goesOn(agent.label));
+    };
+    const done = await runWithPings(agent, () => agent.resume({ due, dir: o.dir, print: toLog ? () => {} : print, stop, spawn, started }));
+    sayEnding(agent, done);
+    return done?.outcome !== 'skipped';
   }
 
   /** Tells Aimiru this runner is going, so Today says it at once (best effort, short). */

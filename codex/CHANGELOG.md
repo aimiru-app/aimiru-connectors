@@ -1,5 +1,13 @@
 # Changes to Aimiru's check for Codex
 
+## 0.3.0-rc.5 (pre-release, 11 Nov 2026)
+
+- The same classifier fixes as Claude Code's rc.5 (reads chained with `cd`, `;`, `&&` and `|`; files git writes with `--output`, `archive -o`, `format-patch -o`, `checkout-index --prefix` and `worktree add` judged by where they land; links, capital letters and new git guards). Codex's check still asks about `git fetch`, once.
+- Ask why reaches Codex (ADR-0201). When you tap Ask why on one of Codex's asks, Codex reads your question the next time it tries that step and answers you in Codex; nothing it says is carried back to Aimiru, and the ask says so. It changes nothing about the ask: the step still waits for your yes or no. Aimiru says Codex will hear your question only from version 0.3.0-rc.5.
+- **Aimiru's record**: Aimiru now learns how each step Codex takes ended. Outside Codex's code mode, a command that ended with any code but 0, such as tests that failed, is recorded as failed next to Aimiru's check of that step; in code mode, and whenever the exit is not found, a step that changed or sent something is recorded with "How it ended is not known". Only a fingerprint of what it printed leaves your computer. It also sends what waits on your computer as each turn ends, as a subagent ends its turn and as a session ends. It runs in the background and can never stop, hold or change a step. Each subagent Codex starts gets your brief too. Codex stays shown as Guardrail (ADR-0174).
+- Install adds five more entries to Codex's `hooks.json`, seven in all. `init` and `doctor` name each one Codex does not trust yet, under the heading `/hooks` lists it by, so one visit there does it.
+- What to do: `npx aimiru-codex@next init` in your project, then open Codex. When it says checks need review, choose **trust all** only if every check it lists is Aimiru's (their commands name `.aimiru`); otherwise type `/hooks` and trust only Aimiru's, as `init` lists them. If the runner was on, run `npx aimiru-codex@next runner on` again.
+
 ## 0.3.0-rc.4 (pre-release, 3 Nov 2026)
 
 - Each step Codex takes inside a job you gave it now names that job in Aimiru, the reads Aimiru allows on your computer included, so the job's record holds every step and Aimiru's closing check reads them all. Nothing about how a step is decided changes.
