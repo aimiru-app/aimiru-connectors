@@ -1,5 +1,14 @@
 # Changes to Aimiru for Claude Code
 
+## 0.3.0-rc.6 (pre-release, 23 Nov 2026)
+
+- Connect from one line you copy in Aimiru. It connects only a computer that is not connected yet, and only to aimiru.app.
+- Each session's first line names the account Aimiru checks Claude Code for, and says when it changed.
+- Connecting again (`/aimiru:connect --again`) asks you first, in your own terminal, and stays with the Aimiru this computer was connected to. Where Claude Code cannot ask you (`claude -p`, the `bypassPermissions` or `dontAsk` modes), it does not run.
+- A folder's own Claude Code settings can no longer send Aimiru's checks somewhere else. When a project's `.claude/settings.json` or `.claude/settings.local.json` (or the working folder's) sets Aimiru's key, address or project, `HOME`, Aimiru's own plugin settings or folders, or is written with comments or names without double quotes and has an `env` or `pluginConfigs` part, Claude Code's steps are refused there, apart from reading, and Claude Code says which file to fix. Set those in your own terminal or in `~/.claude/settings.json` instead, which work as before.
+- Aimiru's check starts the `node` its installed copy recorded, or one found outside the project folder, and runs it in an environment of its own. What else a folder's settings set (a `NODE_OPTIONS` that loads code, a library or OpenSSL setting, a way out to the internet or a certificate) is left out of the check, so your steps go on, and only Aimiru's own commands wait until you remove it or run them in your own terminal. Claude Code itself still finds `sh` on the folder's `PATH`, before the check can run: a folder that puts its own `sh` first can keep the check from running, and Aimiru does not stop it.
+- What to do: `claude plugin marketplace update aimiru`, then `claude plugin update aimiru@aimiru`, and restart Claude Code. If the runner was on, run `node "<plugin>/scripts/runner.mjs" on` again.
+
 ## 0.3.0-rc.5 (pre-release, 11 Nov 2026)
 
 - Claude Code's own housekeeping no longer asks you. Steps that only keep its own books (its task list, plans, questions to you, loading a skill, searching for tools, handing back an answer) and reads of your own computer go ahead without a question or a card in Aimiru. Still asked about: writing a file outside your project, changing Claude Code's or Aimiru's settings, a git guard, pushing, sending, paying, publishing a page to claude.ai, running a program Claude Code wrote that is new, and any step Aimiru does not recognise. Changes inside your project go ahead, as before.

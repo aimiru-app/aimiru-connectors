@@ -1,5 +1,11 @@
 # Changes to Aimiru's check for Codex
 
+## 0.3.0-rc.6 (pre-release, 23 Nov 2026)
+
+- `init` takes the line you copy in Aimiru's Connect screen.
+- The doctor names the account Aimiru checks Codex for.
+- What to do: `npx aimiru-codex@next init` in your project. If the runner was on, run `npx aimiru-codex@next runner on` again.
+
 ## 0.3.0-rc.5 (pre-release, 11 Nov 2026)
 
 - The same classifier fixes as Claude Code's rc.5 (reads chained with `cd`, `;`, `&&` and `|`; files git writes with `--output`, `archive -o`, `format-patch -o`, `checkout-index --prefix` and `worktree add` judged by where they land; links, capital letters and new git guards). Codex's check still asks about `git fetch`, once.

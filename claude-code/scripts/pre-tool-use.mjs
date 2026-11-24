@@ -18,6 +18,13 @@
 //                          -> no output; "ask" (Claude Code asks the person) when it names an address
 //   a read the person's rules allow without condition, by the snapshot Aimiru gave this computer
 //                          -> decided here, written to the local spool first, no output (ADR-0095)
+//   a project's or local settings file sets a name that would hand the check to something else
+//   (lib/runtime.mjs takeoverOf: Aimiru's key or address, the plugin's settings, code loaded into node)
+//                          -> deny every call, Aimiru's own included, naming the file and the names,
+//                             never a value; nothing is sent (the Opus gate on 0.3.0-rc.6)
+//   connected, the plugin's own /aimiru:connect --again
+//                          -> "ask" in the person's own terminal; refused with the reason in -p, the
+//                             SDK, bypassPermissions and dontAsk, where no prompt reaches the person
 //   Aimiru's own check or request_approval tool -> refused: the plugin checks every step itself, and
 //                          the person would be asked twice (ADR-0096); dry runs and practice go ahead
 // Ask and move on (ADR-0145): an ask holds the step at most 4 seconds, and not at all in quiet hours.
@@ -57,13 +64,17 @@ import {
   loadSettings,
   makeClient,
   connectAddressQuestion,
+  connectAgainQuestion,
   ownSetupCommand,
   protectedConfigPaths,
   readStdinJson,
   stateStore,
+  runsOwnScript,
+  takeoverWords,
   takesTasksHere,
   watchFor,
   writeJson,
+  isInteractive,
 } from './lib/runtime.mjs';
 
 const started = Date.now();
@@ -124,6 +135,22 @@ function askInSession(reason) {
       permissionDecisionReason: `${MESSAGES.prefix}${reason}`,
     },
   });
+}
+
+/**
+ * A computer's yes on a step that cannot be undone, where the passkey is the only signer, is
+ * confirmed in Claude Code's own prompt (ADR-0320 change 4). The hooks reference (read 23 Nov
+ * 2026): "ask" prompts the person, goes to the prompt in auto mode and is denied in -p; it says
+ * nothing for bypassPermissions or dontAsk. So where no prompt can be shown (a run that is not the
+ * person's own terminal, or a mode that never asks) the step is refused with the reason, never run.
+ */
+function confirmHereOrRefuse(input, { question = MESSAGES.confirmHere, refusal = MESSAGES.confirmHereNoPrompt } = {}) {
+  const mode = typeof input?.permission_mode === 'string' ? input.permission_mode : null;
+  if (!isInteractive() || mode === 'bypassPermissions' || mode === 'dontAsk') {
+    deny(refusal);
+    return;
+  }
+  askInSession(question);
 }
 
 function allowExplicitly(reason) {
@@ -290,8 +317,24 @@ async function main() {
     return;
   }
   const toolName = input?.tool_name;
+  if (!toolName) return;
+  const settings = loadSettings();
+  // A folder's settings would hand the check to something else (the Opus gate on 0.3.0-rc.6): every
+  // step is refused with the reason, Aimiru's own tools and commands included, and nothing is sent.
+  if (settings.takeover) {
+    deny(takeoverWords(settings.takeover, settings.projectDir, process.env.HOME || undefined));
+    return;
+  }
+  // What a folder's settings set that with-node.sh keeps out of this check (a NODE_OPTIONS that loads
+  // code, a library or OpenSSL setting, a proxy or certificate) would reach the plugin's own commands,
+  // which Claude runs in its own environment with the key in hand: those alone are refused (the final
+  // gate on 0.3.0-rc.6). Every other step goes on to its check.
+  if (settings.folderSoft && runsOwnScript(toolName, input?.tool_input?.command, settings.pluginRoot)) {
+    deny(takeoverWords({ kind: 'soft', ...settings.folderSoft }, settings.projectDir, process.env.HOME || undefined));
+    return;
+  }
   // Aimiru's own tools, only when Claude Code says they come from the Aimiru plugin's own server.
-  if (toolName && isAimiruTool(toolName, input?.mcp_server)) {
+  if (isAimiruTool(toolName, input?.mcp_server)) {
     const ti = input?.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {};
     // The person set this computer not to pick up handed-off work (ADR-0043 review): Claude may not
     // take a task with Aimiru's own tool either, whatever the routine in its instructions says.
@@ -302,9 +345,7 @@ async function main() {
     else if (toolName.endsWith('__request_approval') && ti.practice !== true) deny(MESSAGES.askedTwice);
     return;
   }
-  if (!toolName) return;
 
-  const settings = loadSettings();
   // The plugin's own commands, exactly as their skills run them (ADR-0034). /aimiru:doctor and
   // /aimiru:activity are never asked about, connected or not (wave 10, snag 10: a doctor held for
   // 35 seconds, then refused, with the plugin's path in the Record): the doctor only reads, and
@@ -312,7 +353,8 @@ async function main() {
   // Turning that report off (--off) takes something from what Aimiru sees, so it is checked as any
   // step is. /aimiru:connect runs while Claude Code is not connected yet, since it is how it gets
   // connected; one that names an address is asked of the person in the session, so nothing can point
-  // this plugin at an Aimiru that is not theirs. Connected, a connect is checked with Aimiru as before.
+  // this plugin at an Aimiru that is not theirs. Connected, `/aimiru:connect --again` is the person's
+  // own yes in the session (below); one naming an address is checked with Aimiru as before.
   // Only the plugin's own files by their full path: the unexpanded ${CLAUDE_PLUGIN_ROOT} names a file
   // the shell picks when the command runs, so it is let through only while not connected, as before
   // (wave 10 review). Turning the report on changes Claude Code's own settings (settings.json in
@@ -326,6 +368,22 @@ async function main() {
     }
     if (own && !(settings.token && settings.baseUrl)) {
       if (own.url) askInSession(connectAddressQuestion(own.url));
+      return;
+    }
+    // Connected, the plugin's own connect (`/aimiru:connect --again`) makes a new key for whichever
+    // account taps Connect on the pairing page, and --email sends the request to that address's
+    // phone: every later step would then run under that account's limits and Pause. So it is never
+    // silent: the person allows it in the session, a yes Claude cannot give (ADR-0034, amended
+    // 13 Nov). Asked, not checked with Aimiru, so a Pause (one a waiting switch sets, say) never
+    // holds the way back to the person's own account. Where Claude Code cannot ask (-p, the SDK,
+    // bypassPermissions, dontAsk), "ask" would not reach the person, so it is refused with the
+    // reason (the Opus gate on 0.3.0-rc.6). One that names an address is the person's yes too, with
+    // the address in the question (agent-experience review of rc.6: `--again --url <the saved
+    // address>` went to Aimiru as any command, so the yes could be skipped). The skill's unexpanded
+    // variable is checked with Aimiru as before.
+    if (own && own.script === 'connect' && !own.literal) {
+      const question = own.url ? connectAddressQuestion(own.url) : connectAgainQuestion(own.email);
+      confirmHereOrRefuse(input, { question, refusal: MESSAGES.connectAgainNoPrompt });
       return;
     }
   }
@@ -604,6 +662,12 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
         rememberYes(pending.programs);
         // A later yes let the step through: minutes from the ask to the step running (ADR-0145).
         traceAsk({ kind: 'ran', exception_id: pending.exceptionId, asked_at: Number.isFinite(pending.ts) ? new Date(pending.ts).toISOString() : null });
+        // A computer's yes on a step that cannot be undone: Claude Code's own prompt confirms it
+        // (ADR-0320 change 4), never the yes alone.
+        if (answer.confirmHere) {
+          confirmHereOrRefuse(input);
+          return;
+        }
         allowExplicitly(MESSAGES.askAllowed);
         return;
       } else if (answer.status === 'denied' && answer.reason === 'paused') {
@@ -696,6 +760,10 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
     if (answer.status === 'allowed') {
       remember({ actionId: d.actionId ?? null, unchecked: false });
       rememberYes();
+      if (answer.confirmHere) {
+        confirmHereOrRefuse(input);
+        return;
+      }
       allowExplicitly(MESSAGES.askAllowed);
       return;
     }

@@ -27,8 +27,10 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { briefOf } from './vendor/aimiru-client.mjs';
+import { accountEmailOf, rememberAccount } from './vendor/account.mjs';
+import { MESSAGES } from './vendor/messages.mjs';
 import { findOurBrief } from './lib/install.mjs';
-import { installReport, loadSettings, makeClient, readStdinJson, reportedSinceInstall, stateStore } from './lib/runtime.mjs';
+import { AGENT_LABEL, installReport, loadSettings, makeClient, readStdinJson, reportedSinceInstall, stateStore } from './lib/runtime.mjs';
 
 /** The folder this runs from (the copy init made, ~/.aimiru/codex/app). */
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -75,7 +77,15 @@ async function main() {
   const subagent = fromSubagent(input);
   // A brief for a subagent only from Codex's own SubagentStart; by hand, nothing.
   if (input?.hook_event_name === 'SubagentStart' && !subagent) return;
-  const brief = briefOf(await client.brief({ timeoutMs: BRIEF_MS }).catch(() => null));
+  // The account this session reports to, asked beside the brief so the start waits no longer (journey
+  // lane 2); only for a session, not a subagent. Any failure is silence.
+  const [briefAnswer, meAnswer] = await Promise.all([
+    client.brief({ timeoutMs: BRIEF_MS }).catch(() => null),
+    fromCodex(input) ? client.me({ timeoutMs: BRIEF_MS }).catch(() => null) : Promise.resolve(null),
+  ]);
+  const brief = briefOf(briefAnswer);
+  const accountEmail = meAnswer?.ok ? accountEmailOf(meAnswer.data) : null;
+  if (accountEmail) rememberAccount(process.env, 'codex', AGENT_LABEL, accountEmail);
   if (subagent) {
     try {
       store.updateStatus({ subagent_brief_ran_at: new Date().toISOString(), subagent_brief_state: brief.state });
@@ -97,10 +107,17 @@ async function main() {
       ...(at?.present ? { brief_group_index: at.groupIndex, brief_handler_index: at.handlerIndex } : {}),
     });
   }
-  if (brief.state !== 'given') return;
+  // The first line names the account in full, and a waiting switch of the phone shows its countdown:
+  // the person's own screen (systemMessage), never given to the model.
+  const said = accountEmail ? [MESSAGES.accountLine(accountEmail), ...(meAnswer.data?.switch?.ends_at ? [MESSAGES.switchWaits(meAnswer.data.switch.ends_at)] : [])].join(' ') : null;
+  if (brief.state !== 'given' && !said) return;
   // Written whole before the process ends (a pipe on macOS takes it in the background).
   const hookEventName = subagent ? 'SubagentStart' : 'SessionStart';
-  await new Promise((resolve) => process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext: brief.text } })}\n`, resolve));
+  const out = {
+    ...(said ? { systemMessage: said } : {}),
+    ...(brief.state === 'given' ? { hookSpecificOutput: { hookEventName, additionalContext: brief.text } } : {}),
+  };
+  await new Promise((resolve) => process.stdout.write(`${JSON.stringify(out)}\n`, resolve));
 }
 
 main().then(

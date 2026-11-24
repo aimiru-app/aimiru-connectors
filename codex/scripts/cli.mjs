@@ -1,5 +1,5 @@
 // Command line for Aimiru's check for Codex (ADR-0091, ADR-0157):
-//   aimiru-codex init [--aimiru-url <address>] [--paste-key] [--email <your Aimiru email>] [--wait <seconds>]
+//   aimiru-codex init [--aimiru-url <address>] [--paste-key] [--email <your Aimiru email>] [--wait <seconds>] [--ticket <the line's ticket>]
 //   aimiru-codex doctor [--json]
 //   aimiru-codex take [--watch] [--dir <folder>]
 //   aimiru-codex remember "<one plain line>" [--topic <topic>] [--how <noticed|instructions>]
@@ -30,9 +30,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { openPage as openInBrowser } from './vendor/open-page.mjs';
 import {
+  CONNECT_TICKET,
+  startTicketFrom,
   PAIR_MAX_WAIT_MS,
   PAIR_MESSAGES,
   dropPendingPairing,
+  deviceIdIn,
   pairAgent,
   pendingLasts,
   readKeyFile,
@@ -44,6 +47,7 @@ import {
 } from './vendor/pair.mjs';
 import { installSource, normaliseBaseUrl, setting } from './vendor/aimiru-client.mjs';
 import { MESSAGES } from './vendor/messages.mjs';
+import { accountEmailOf, accountsDisagree, rememberAccount } from './vendor/account.mjs';
 import { pauseHoldOn } from './vendor/pause-watch.mjs';
 import {
   AGENT_LABEL,
@@ -95,6 +99,7 @@ Usage:
       --paste-key                      paste a key instead of picking a code in your browser
       --email <your Aimiru email>      the request to connect also reaches your phone
       --wait <seconds>                 how long to wait for you to connect it (at most 10 minutes)
+      --ticket <ticket>                from the line Aimiru's Connect screen copies: tap Connect there
   ${PACKAGE_NAME} doctor [--json]      check that everything works
   ${PACKAGE_NAME} take                 run the next job you gave Codex in Aimiru, in this folder
       --watch                          keep looking every 30 seconds, until Ctrl+C
@@ -256,11 +261,18 @@ export async function init(o = {}) {
   // The key: the environment, the key saved before for this address, the key an earlier install
   // saved for it (ADR-0164: the same agent keeps its rules and standing; not when the person came to
   // paste a key, which Connect has just made), a hidden prompt, or pairing.
-  let key = (setting(env, 'AGENT_TOKEN') || '').trim();
-  if (!key && settings.keySource === 'file' && settings.baseUrl === url) key = settings.token;
+  // A line from the person's Connect screen (--ticket): they asked to connect this computer now, so it
+  // pairs even with a key saved here; the same computer by its id reconnects the same agent, and the
+  // old key keeps working until the new one is collected.
+  // The line hands it over in the environment (AIMIRU_START_TICKET), never on the command line, where any
+  // other program on this computer could read it while the request waits; --ticket stays for a person typing.
+  const ticket =
+    startTicketFrom(env) ?? (typeof o.ticket === 'string' && CONNECT_TICKET.test(o.ticket.trim()) ? o.ticket.trim() : null);
+  let key = ticket ? '' : (setting(env, 'AGENT_TOKEN') || '').trim();
+  if (!key && !ticket && settings.keySource === 'file' && settings.baseUrl === url) key = settings.token;
   const earlier = earlierDataDir({ codexHome, appDir: appDirOf(dataDir) });
   let carried = null;
-  if (!key && earlier && o.pasteKey !== true) {
+  if (!key && !ticket && earlier && o.pasteKey !== true) {
     const saved = readKeyFile(keyFilePath(earlier));
     if (saved && sameAddress(saved.baseUrl, url)) {
       key = saved.key;
@@ -275,7 +287,7 @@ export async function init(o = {}) {
     const waitS = Number(o.waitS);
     const result = await pairAgent({
       baseUrl: url,
-      agent: { name: AGENT_LABEL, kind: 'mcp_proxy', host: os.hostname() },
+      agent: { name: AGENT_LABEL, kind: 'mcp_proxy', host: os.hostname(), device: deviceIdIn(dataDir) },
       connector: { name: CONNECTOR, version: VERSION },
       personEmail: o.email || null,
       say: print,
@@ -285,6 +297,7 @@ export async function init(o = {}) {
       openPage: o.openPage || ((page) => openInBrowser(page, { baseUrl: url, env })),
       remindEveryMs: REMIND_EVERY_MS,
       signal: o.stop || null,
+      ticket,
       ...(seams.fetch ? { fetch: seams.fetch } : {}),
       ...(seams.sleep ? { sleep: seams.sleep } : {}),
       ...(seams.now ? { now: seams.now } : {}),
@@ -434,6 +447,16 @@ export async function doctor(o = {}) {
     // A demo's key after its hour (wave 10, snag 12): say so, with the line that removes the check.
     const ended = !me.ok && me.status === 401 && me.fromAimiru !== false && me.code === 'demo_ended';
     add('reach', me.ok, ended ? WORDS.demoEnded(UNDO_LINE) : WORDS.doctorReach(me.ok));
+    // The account, in full (journey lane 2); a warning, not a failure, when Claude Code on this
+    // computer reports to another account.
+    const account = me.ok ? accountEmailOf(me.data) : null;
+    if (account) {
+      add('account', true, MESSAGES.accountLine(account));
+      rememberAccount(env, 'codex', AGENT_LABEL, account);
+      const apart = accountsDisagree(env, { connector: 'codex', agent: AGENT_LABEL, email: account });
+      if (apart.length) add('account_mismatch', true, `${MESSAGES.accountMismatch(apart)} To move one, run /aimiru:connect --again in Claude Code (or connect Codex again), and pick the same account on the page that opens.`);
+    }
+    if (me.ok && me.data?.switch?.ends_at) add('switch', true, MESSAGES.switchWaits(me.data.switch.ends_at));
   }
   // Only a run inside Codex since the last init proves the person trusted the check (wave 10, T5,
   // and the review's finding 6: an init whose report failed still counts as an init).
@@ -550,6 +573,7 @@ export async function main(argv = process.argv.slice(2)) {
         pasteKey: flags.pasteKey === true,
         email: typeof flags.email === 'string' ? flags.email : null,
         waitS: typeof flags.wait === 'string' ? Number(flags.wait) : null,
+        ticket: typeof flags.ticket === 'string' ? flags.ticket : null,
         stop: stopper.signal,
       });
     } finally {

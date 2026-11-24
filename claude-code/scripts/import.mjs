@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { AGENT_LABEL, findDataDir, loadSettings, makeClient } from './lib/runtime.mjs';
+import { AGENT_LABEL, findDataDir, loadSettings, makeClient, ownCommandRefusal } from './lib/runtime.mjs';
 import { IMPORT_WORDS, dropPending, lookStep, parseLeaveOut, sendStep } from './vendor/import-lines.mjs';
 
 export const IMPORT_COMMAND = '/aimiru:import';
@@ -45,13 +45,19 @@ export function parseArgs(argv) {
  * @returns {Promise<number>}
  */
 export async function runImport({ argv = process.argv.slice(2), env = process.env, say = (l) => process.stdout.write(`${l}\n`), projectDir } = {}) {
+  // A folder's settings that would reach this command, which sends with the key: nothing is read or sent.
+  const refusal = ownCommandRefusal(env);
+  if (refusal) {
+    say(refusal);
+    return 1;
+  }
   const args = parseArgs(argv);
   if (!args) {
     say(`Run it as ${IMPORT_COMMAND}, or with --send, --send --leave-out and the numbers, or --none.`);
     return 2;
   }
   // Run by Claude from the skill, this has no CLAUDE_PLUGIN_DATA: the state goes where the key is.
-  const settings = loadSettings({ ...env, CLAUDE_PLUGIN_DATA: findDataDir(env) });
+  const settings = loadSettings({ ...env, CLAUDE_PLUGIN_DATA: findDataDir(env) }, { workingDir: process.cwd() });
   const dataDir = settings.dataDir;
   const project = projectDir || env.CLAUDE_PROJECT_DIR || process.cwd();
 

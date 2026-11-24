@@ -37,6 +37,30 @@ function endsSessionJob(input) {
   return input.tool_response?.isError !== true;
 }
 
+/**
+ * The job id Aimiru's own take_task tool gave this session, or null: the task in its answer
+ * (structuredContent.task.id, else the JSON in its text), when Aimiru did not answer with an error.
+ * Each later check of the session names it, as a job the session took at its start does
+ * (ADR-0157), so the check's hold on a booking or a payment inside a plan's job binds an
+ * interactive session too (ADR-0306).
+ */
+function takenJobId(input) {
+  if (!String(input.tool_name).endsWith('__take_task') || typeof input.session_id !== 'string' || !input.session_id) return null;
+  const res = input.tool_response;
+  if (!res || typeof res !== 'object' || res.isError === true) return null;
+  let body = res.structuredContent && typeof res.structuredContent === 'object' ? res.structuredContent : null;
+  if (!body && Array.isArray(res.content)) {
+    const text = res.content.find((c) => c && c.type === 'text' && typeof c.text === 'string')?.text;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = null;
+    }
+  }
+  const id = body?.task && typeof body.task === 'object' ? body.task.id : null;
+  return typeof id === 'string' && /^[0-9a-fA-F-]{36}$/.test(id) ? id : null;
+}
+
 /** The order id in a checkout's output: the store's order.id, or Link's lsrq_ request id. */
 function orderIdOf(input, checkout) {
   try {
@@ -62,6 +86,12 @@ async function main() {
     if (event === 'PostToolUse' && endsSessionJob(input)) {
       const settings = loadSettings();
       stateStore(settings.dataDir, { secret: settings.token }).clearSessionTask(input.session_id, input.tool_input.task_id);
+    }
+    // A job Claude took with Aimiru's own take_task tool: the session's later checks name it.
+    const taken = event === 'PostToolUse' ? takenJobId(input) : null;
+    if (taken) {
+      const settings = loadSettings();
+      stateStore(settings.dataDir, { secret: settings.token }).putSessionTask(input.session_id, taken);
     }
     return;
   }

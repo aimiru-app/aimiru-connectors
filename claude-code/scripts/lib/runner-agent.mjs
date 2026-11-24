@@ -289,7 +289,7 @@ export function claudeBinOf(env = process.env) {
 /** The plugin's own settings, as its hooks read them, from the data folder Claude Code keeps for it. */
 export function pluginSettings(env = process.env) {
   const dataDir = findDataDir({ ...env, CLAUDE_PLUGIN_DATA: '' });
-  return { ...loadSettings({ ...env, CLAUDE_PLUGIN_DATA: dataDir }), dataDir };
+  return { ...loadSettings({ ...env, CLAUDE_PLUGIN_DATA: dataDir }, { workingDir: process.cwd() }), dataDir };
 }
 
 /**

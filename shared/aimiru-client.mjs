@@ -1105,6 +1105,10 @@ export function createAimiruClient(opts = {}) {
   const fetchImpl = opts.fetch || globalThis.fetch;
   const connector = opts.connector || 'unknown/0.0.0';
   const agentLabel = opts.agentLabel || 'This agent';
+  // ADR-0320 change 4: this connector can hand a step to its host's own prompt (Claude Code's
+  // permissionDecision "ask"), so Aimiru may answer a computer's yes on a step that cannot be undone
+  // with confirm_here instead of keeping it waiting.
+  const hostConfirm = opts.hostConfirm === true;
   const connectHow = typeof opts.connect === 'string' && opts.connect.trim() ? opts.connect.trim() : DEFAULT_CONNECT;
   const undoLine = typeof opts.undoLine === 'string' && opts.undoLine.trim() ? opts.undoLine.trim() : undoLineFor(connector);
   /** What every refusal says once Aimiru answers that the demo has ended (wave 10, snag 12). */
@@ -1249,7 +1253,8 @@ export function createAimiruClient(opts = {}) {
     // relay_why=1 (ADR-0201): this read passes the person's "why?" on to the agent, so Aimiru marks
     // it seen. An older Aimiru ignores it.
     const relay = relayWhy ? '&relay_why=1' : '';
-    return request('GET', `/v1/approvals/${encodeURIComponent(exceptionId)}?wait=${wait}${waiting}${relay}`, { timeoutMs: t });
+    const confirm = hostConfirm ? '&confirm=host' : '';
+    return request('GET', `/v1/approvals/${encodeURIComponent(exceptionId)}?wait=${wait}${waiting}${relay}${confirm}`, { timeoutMs: t });
   }
 
 
@@ -1640,7 +1645,14 @@ export function createAimiruClient(opts = {}) {
       // When the person said yes (Aimiru's clock), so a yes given before a Pause is never used after
       // it (ADR-0035, ADR-0142); null from an Aimiru that does not say.
       if (d.status === 'allowed' || (d.status == null && d.decision === 'allow')) {
-        return { status: 'allowed', explain: d.explain ?? null, reason: 'aimiru', answeredAt: typeof d.answered_at === 'string' ? d.answered_at : null };
+        return {
+          status: 'allowed',
+          explain: d.explain ?? null,
+          reason: 'aimiru',
+          answeredAt: typeof d.answered_at === 'string' ? d.answered_at : null,
+          // The host's own prompt confirms it before it runs (ADR-0320 change 4).
+          ...(d.confirm_here === true ? { confirmHere: true } : {}),
+        };
       }
       // The person asked the agent why (ADR-0201): only Aimiru's own fixed sentence comes back, never
       // the person's words, and only whether the agent answered already.

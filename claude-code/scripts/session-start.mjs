@@ -40,6 +40,7 @@
 // input, quoted as data, to take once if the person says so. Not after a compaction.
 // Prints no secret: never the key, never the Aimiru address.
 
+import os from 'node:os';
 import { aimiruToolName } from './vendor/classify.mjs';
 import { sessionSandbox } from './lib/sandbox.mjs';
 import { sessionBaselineFor } from './vendor/newness.mjs';
@@ -67,12 +68,17 @@ import {
   skillVersion,
   stateStore,
   supportsBlockOnFailure,
+  recordNodePath,
+  takeoverWords,
   takesJobsHere,
   takesTasksHere,
   watchFor,
   writeJson,
   fitContext,
 } from './lib/runtime.mjs';
+import { accountEmailOf, readAccounts, rememberAccount } from './vendor/account.mjs';
+import { startTicketFrom } from './vendor/pair.mjs';
+import { startLineMessage } from './lib/start-line.mjs';
 
 /** How Claude names the Aimiru tools this plugin's own server gives it (.claude-plugin/plugin.json). */
 const AIMIRU_TOOL_PREFIX = aimiruToolName('');
@@ -100,6 +106,21 @@ function pausedLine(explain) {
   return pauseHoldOn(process.env, PAUSE_HOLDS) ? MESSAGES.pauseHolding : MESSAGES.pausedNotice(explain);
 }
 
+
+/**
+ * This computer's own name for the heartbeat, read from the local host name only (never an
+ * address, a user name or anything else about the machine). At most 60 characters; null when
+ * the system gives none.
+ */
+function localComputerName() {
+  try {
+    const name = String(os.hostname() || '').trim().slice(0, 60);
+    return name === '' ? null : name;
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const started = Date.now();
   let input = {};
@@ -108,13 +129,25 @@ async function main() {
   } catch {
     input = {};
   }
-  const settings = loadSettings();
+  // A new Claude Code (startup) with this folder's settings clean forgets what an earlier one carried.
+  const settings = loadSettings(process.env, { newProcess: String(input.source || 'startup') === 'startup' });
   const store = stateStore(settings.dataDir, { secret: settings.token });
   const client = makeClient(settings);
 
+  // A folder's settings would hand the check to something else (the Opus gate on 0.3.0-rc.6): the
+  // first line says so, nothing is sent, and every step is refused until it is fixed.
+  if (settings.takeover) {
+    writeJson({ systemMessage: takeoverWords(settings.takeover, settings.projectDir, process.env.HOME || undefined, { person: true }) });
+    return;
+  }
+  // Where this Node.js really is, for every later check to start with (with-node.sh).
+  recordNodePath(settings);
+
   if (!client.configured) {
     store.writeStatus({ ts: new Date().toISOString(), configured: false, connector_version: VERSION });
-    writeJson({ systemMessage: MESSAGES.setupNeeded });
+    // Installed from the Connect screen's line: connect-start.mjs, beside this hook, is asking now,
+    // unless this folder's settings carry the line (lib/start-line.mjs, the same rule it follows).
+    writeJson({ systemMessage: startLineMessage(process.env, settings) ?? MESSAGES.setupNeeded });
     return;
   }
 
@@ -146,6 +179,10 @@ async function main() {
     session_source: input.source || null,
     platform: process.platform,
     node: process.versions.node,
+    // This computer's own name, read from its local host name only, so the person can tell their
+    // agents apart on Agents, where it shows as reported (ADR-0258; /privacy says so). Never on an
+    // ask, and nothing else that names the machine is read.
+    computer: localComputerName(),
     // The person's jobs land here by themselves: a session they start takes one (ADR-0157).
     accepts_tasks: takesJobsHere(),
     // Claude Code's sandbox for this session's shell commands, as the settings say (ADR-0090):
@@ -308,6 +345,24 @@ async function main() {
   else if (!hb.ok) systemMessage = client.pausedLocally() ? pausedLine(client.pausedLocally().explain) : MESSAGES.unreachableNow;
   else if (paused) systemMessage = pausedLine(hb.data?.explain);
   else if (tier && tier !== 'enforced') systemMessage = MESSAGES.tierNotice(cap(tier), reason);
+
+  // The first line names the account in full (journey lane 2), and a waiting switch of the phone shows
+  // its countdown. The person's own screen only: systemMessage is not given to Claude.
+  // When the account is not the one the last session here named, the first line says so plainly
+  // (the Opus security gate of 23 Nov 2026, M1): a re-pair is never silent.
+  const accountEmail = hb.ok && !isDemoEnded(hb) ? accountEmailOf(hb.data) : null;
+  if (accountEmail) {
+    const before = readAccounts(process.env)['claude-code']?.email;
+    rememberAccount(process.env, 'claude-code', AGENT_LABEL, accountEmail);
+    const changed = typeof before === 'string' && before.toLowerCase() !== accountEmail.toLowerCase();
+    const lines = [changed ? MESSAGES.accountChanged(accountEmail, before) : MESSAGES.accountLine(accountEmail)];
+    // A line from the Connect screen on a computer connected already: connect-start.mjs sent nothing.
+    if (startTicketFrom(process.env)) lines.push(MESSAGES.lineNotUsedConnected);
+    if (hb.data?.switch?.ends_at) lines.push(MESSAGES.switchWaits(hb.data.switch.ends_at));
+    systemMessage = [lines.join(' '), systemMessage].filter(Boolean).join(' ');
+  } else if (startTicketFrom(process.env)) {
+    systemMessage = [MESSAGES.lineNotUsedConnected, systemMessage].filter(Boolean).join(' ');
+  }
 
   // The person sees that this session was given a task; Claude reads the task itself.
   if (task) systemMessage = [systemMessage, task.from_person === true ? MESSAGES.jobTaken : MESSAGES.taskTaken(task.from_agent)].filter(Boolean).join(' ');

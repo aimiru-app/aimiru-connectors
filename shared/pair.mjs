@@ -17,9 +17,23 @@
 //
 // Never prints or logs the key or the poll secret.
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createAimiruClient, normaliseBaseUrl, sleep as realSleep } from './aimiru-client.mjs';
+
+/** A start ticket's shape (packages/core connect-ticket.ts): aimiru_cst_ and 43 characters. */
+export const CONNECT_TICKET = /^aimiru_cst_[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The start ticket the pasted line hands over in the environment (AIMIRU_START_TICKET), never on the
+ * command line, where any other program on the computer could read it while the request waits; null when
+ * there is none. It is used once and lasts thirty minutes; nothing keeps it after.
+ */
+export function startTicketFrom(env = process.env) {
+  const raw = String(env?.AIMIRU_START_TICKET ?? '').trim();
+  return CONNECT_TICKET.test(raw) ? raw : null;
+}
 
 /** Seconds between polls the server asks for, and its floor (it answers slow_down under 300 ms). */
 export const PAIR_INTERVAL_MS = 3_000;
@@ -54,6 +68,14 @@ export const PAIR_MESSAGES = Object.freeze({
   /** This run stopped waiting while the request still lasts; `command` waits on the same code. */
   stillWaitingRun: (command) => `Still waiting: run ${command} again to keep waiting with the same code.`,
   connected: (name) => `Connected to Aimiru as ${name}.`,
+  /** A request from the line a person copied on their Connect screen: it shows up there. */
+  onSheet: 'Now tap Connect in Aimiru, on the screen where you copied this line.',
+  /** From another network than the screen's, Aimiru asks the person for the code too. */
+  onSheetCode: (code) => `If Aimiru asks for a code, pick ${code}.`,
+  /** The line's connect was refused (used, run out, unknown, or for another agent): a code instead. */
+  lineRanOut: 'That line from Aimiru ran out or was used. Here is a code to connect with instead.',
+  /** The same, where nothing else can ask (a session start): the person copies a new line. */
+  lineRanOutCopyNew: 'That line from Aimiru ran out or was used. Copy a new one from Aimiru, under Agents.',
   savedKey: (file) => `Saved the key to ${file}, readable only by you.`,
   practice: 'Aimiru sent you a practice request as an alert. Answer it from that alert: nothing happens either way.',
   practiceAnswered: (seconds) => `You answered in ${seconds} s.`,
@@ -112,7 +134,7 @@ async function post(fetchImpl, url, body, connector, timeoutMs = 10_000) {
  * POST /v1/pair. Returns {ok: true, pairId, pollSecret, code, approveUrl, intervalMs, expiresIn}
  * or {ok: false, reason: 'no_address' | 'bad_address' | 'limited' | 'refused' | 'unreachable' | 'bad_request', message}.
  */
-export async function startPairing({ baseUrl, agent, connector, personEmail = null, templateHint = null, fetch: fetchImpl = globalThis.fetch } = {}) {
+export async function startPairing({ baseUrl, agent, connector, personEmail = null, templateHint = null, ticket = null, fetch: fetchImpl = globalThis.fetch } = {}) {
   if (!baseUrl) return { ok: false, reason: 'no_address', message: PAIR_MESSAGES.noAddress };
   let base;
   try {
@@ -121,11 +143,21 @@ export async function startPairing({ baseUrl, agent, connector, personEmail = nu
     return { ok: false, reason: 'bad_address', message: PAIR_MESSAGES.badAddress(e.message) };
   }
   const connectorLabel = connector?.name ? `${connector.name}/${connector.version || '0'}` : null;
+  const device = typeof agent?.device === 'string' && DEVICE_ID.test(agent.device) ? agent.device : null;
   const body = {
-    agent: { name: agent?.name, kind: agent?.kind || 'custom', ...(agent?.host ? { host: String(agent.host).slice(0, 80) } : {}) },
+    agent: {
+      name: agent?.name,
+      kind: agent?.kind || 'custom',
+      ...(agent?.host ? { host: String(agent.host).slice(0, 80) } : {}),
+      // This computer's own id (deviceIdIn): connecting again from it reconnects the same agent.
+      ...(device ? { device } : {}),
+    },
     ...(connector ? { connector } : {}),
     ...(personEmail ? { person_email: personEmail } : {}),
     ...(templateHint ? { template_hint: templateHint } : {}),
+    // The person's own start ticket, from the line their Connect screen copied (ADR-0261): the request
+    // shows up on that screen, where one Connect connects it. Never logged or printed.
+    ...(ticket && CONNECT_TICKET.test(ticket) ? { ticket } : {}),
   };
   const r = await post(fetchImpl, `${base}/v1/pair`, body, connectorLabel);
   if (r.status === 200 && r.data?.pair_id && r.data?.poll_secret && r.data?.code) {
@@ -138,9 +170,14 @@ export async function startPairing({ baseUrl, agent, connector, personEmail = nu
       approveUrl: r.data.approve_url,
       intervalMs: Math.max(1_000, Number(r.data.interval) * 1000 || PAIR_INTERVAL_MS),
       expiresIn: Number(r.data.expires_in) || 600,
+      onSheet: r.data.ticket === true,
     };
   }
   if (r.status === 0) return { ok: false, reason: 'unreachable', message: PAIR_MESSAGES.unreachable };
+  // The ticket was turned down (used, run out, unknown: 410; for another agent: 409).
+  if ((r.status === 410 || r.status === 409) && r.fromAimiru && /^ticket_/.test(String(r.data?.status ?? ''))) {
+    return { ok: false, reason: 'ticket_refused', message: PAIR_MESSAGES.lineRanOut };
+  }
   if (!r.fromAimiru) return { ok: false, reason: 'refused', message: PAIR_MESSAGES.refused(r.status) };
   if (r.status === 429) return { ok: false, reason: 'limited', message: PAIR_MESSAGES.limited(r.retryAfter ?? 60) };
   if (r.status === 400) return { ok: false, reason: 'bad_request', message: r.data?.error?.message || PAIR_MESSAGES.unreachable };
@@ -229,6 +266,8 @@ export async function pairAgent({
   openPage = null,
   remindEveryMs = 0,
   signal = null,
+  ticket = null,
+  fallbackWithoutTicket = true,
 } = {}) {
   const connectorLabel = connector?.name ? `${connector.name}/${connector.version || '0'}` : null;
   const kept = Boolean(resume && resume.pairId && resume.pollSecret && Number.isFinite(resume.expiresAt));
@@ -239,16 +278,30 @@ export async function pairAgent({
     const last = await pollPairing({ baseUrl: resume.baseUrl, pairId: resume.pairId, pollSecret: resume.pollSecret, connector: connectorLabel, fetch: fetchImpl });
     if (last.status === 'approved') return approvedResult(last, resume.baseUrl, agent);
   }
-  const started = resumed
+  let started = resumed
     ? { ok: true, ...resume }
-    : await startPairing({ baseUrl, agent, connector, personEmail, templateHint, fetch: fetchImpl });
+    : await startPairing({ baseUrl, agent, connector, personEmail, templateHint, ticket, fetch: fetchImpl });
+  // A line that ran out: a code instead, where the person can read one (a terminal); never from a
+  // session start, which has nobody to show it to.
+  if (!started.ok && started.reason === 'ticket_refused') {
+    if (!fallbackWithoutTicket) return { ok: false, reason: 'ticket_refused', message: PAIR_MESSAGES.lineRanOutCopyNew };
+    say(PAIR_MESSAGES.lineRanOut);
+    started = await startPairing({ baseUrl, agent, connector, personEmail, templateHint, fetch: fetchImpl });
+  }
   if (!started.ok) return started;
   if (!started.expiresAt) started.expiresAt = now() + started.expiresIn * 1000;
   if (onStarted && !resumed) onStarted(started);
-  // A kept request's page is open already (the run before opened it): only a new one is opened.
-  const opened = !resumed && typeof openPage === 'function' ? await tryOpen(openPage, started.approveUrl) : false;
-  say(opened ? PAIR_MESSAGES.opened(started.approveUrl) : PAIR_MESSAGES.open(started.approveUrl));
-  say(PAIR_MESSAGES.pick(started.code));
+  if (started.onSheet) {
+    // The person's own Connect screen shows it, with one Connect: no page to open. From another network
+    // than the screen's (a line someone else saw), Aimiru asks for the code as well, so it is shown here.
+    say(PAIR_MESSAGES.onSheet);
+    say(PAIR_MESSAGES.onSheetCode(started.code));
+  } else {
+    // A kept request's page is open already (the run before opened it): only a new one is opened.
+    const opened = !resumed && typeof openPage === 'function' ? await tryOpen(openPage, started.approveUrl) : false;
+    say(opened ? PAIR_MESSAGES.opened(started.approveUrl) : PAIR_MESSAGES.open(started.approveUrl));
+    say(PAIR_MESSAGES.pick(started.code));
+  }
   say(resumed ? PAIR_MESSAGES.waitingLeft(minutesLeft(started.expiresAt, now())) : PAIR_MESSAGES.waiting);
   const deadline = Math.min(now() + maxWaitMs, started.expiresAt + 30_000);
   let interval = started.intervalMs;
@@ -343,6 +396,46 @@ export function readKeyFile(file) {
   }
 }
 
+/** The file in a connector's own folder that keeps this computer's id for pairing (deviceIdIn). */
+export const DEVICE_FILE = 'device-id';
+/** What POST /v1/pair takes as agent.device: 8 to 128 letters, digits, dots, colons, dashes or underscores. */
+const DEVICE_ID = /^[A-Za-z0-9.:_-]{8,128}$/;
+
+/**
+ * This computer's own id for pairing (agent.device, CONTRACT.md "Pairing"): random, made once and
+ * kept in the connector's own folder (owner-only), never read from the hardware or its name.
+ * Connecting again from the same computer then reconnects the same agent with a new key (with the
+ * person's own ticket, or their Reconnect on the code page), and another computer is another agent,
+ * named for its computer ("Claude Code on studio-mac"). Aimiru keeps only its hash. Null when it
+ * cannot be kept here: the request then goes without it, as before.
+ */
+export function deviceIdIn(dir, { make = () => `dev-${randomUUID()}` } = {}) {
+  if (!dir) return null;
+  const file = path.join(dir, DEVICE_FILE);
+  try {
+    const kept = fs.readFileSync(file, 'utf8').trim();
+    if (DEVICE_ID.test(kept)) return kept;
+  } catch {
+    // none kept yet
+  }
+  const made = make();
+  if (!DEVICE_ID.test(made)) return null;
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, `${made}\n`, { mode: 0o600 });
+    try {
+      fs.chmodSync(tmp, 0o600);
+    } catch {
+      // not supported on this system
+    }
+    fs.renameSync(tmp, file);
+    return made;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Keeps a request a run started (ADR-0150), so the next run waits on the same code and collects the
  * key Aimiru makes for it even when this run ended first: {base_url, pair_id, poll_secret, code,
@@ -361,6 +454,7 @@ export function writePendingPairing(file, started) {
       approve_url: started.approveUrl,
       interval_ms: started.intervalMs,
       expires_at: started.expiresAt,
+      ...(started.onSheet === true ? { on_sheet: true } : {}),
     }),
     { mode: 0o600 },
   );
@@ -412,6 +506,7 @@ export function resumeFrom(pending, baseUrl, now = Date.now()) {
     approveUrl: pending.approve_url,
     intervalMs: Number(pending.interval_ms) || PAIR_INTERVAL_MS,
     expiresAt: Number(pending.expires_at),
+    ...(pending.on_sheet === true ? { onSheet: true } : {}),
   };
 }
 

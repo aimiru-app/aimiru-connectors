@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { claudeConfigDir, findDataDir, keyFilePath, loadSettings } from './lib/runtime.mjs';
+import { claudeConfigDir, findDataDir, keyFilePath, loadSettings, ownCommandRefusal } from './lib/runtime.mjs';
 import { readKeyFile } from './vendor/pair.mjs';
 import { normaliseBaseUrl } from './vendor/aimiru-client.mjs';
 
@@ -241,6 +241,13 @@ export async function activity({
   say = (l) => process.stdout.write(`${l}\n`),
   managedFiles = managedSettingsFiles(),
 } = {}) {
+  // A folder's settings that would reach this command, which writes the key's helper into Claude
+  // Code's settings: nothing is read or written (the review of 3fd574e33).
+  const refusal = ownCommandRefusal(env);
+  if (refusal) {
+    say(refusal);
+    return 1;
+  }
   const args = parseArgs(argv);
   const home = env.HOME || env.USERPROFILE || os.homedir();
   // The settings this Claude Code reads: in the folder CLAUDE_CONFIG_DIR names when it was started
@@ -255,7 +262,7 @@ export async function activity({
   }
   const settings = read.value;
   const saved = readKeyFile(keyFilePath(dataDir));
-  const configured = loadSettings({ ...env, CLAUDE_PLUGIN_DATA: dataDir });
+  const configured = loadSettings({ ...env, CLAUDE_PLUGIN_DATA: dataDir }, { workingDir: process.cwd() });
 
   if (args.off || args.status) {
     const env0 = settings.env && typeof settings.env === 'object' ? settings.env : {};

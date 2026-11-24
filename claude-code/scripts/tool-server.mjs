@@ -100,8 +100,9 @@ export function toolServerEnv(env = process.env) {
 
 /** Where to send messages and with which key, or null while this Claude Code is not connected. */
 export function connection(env = process.env) {
-  const settings = loadSettings(toolServerEnv(env));
-  if (!settings.token || !settings.baseUrl) return null;
+  const settings = loadSettings(toolServerEnv(env), { workingDir: process.cwd() });
+  // A folder's settings would take the check over: no address and no key from here (loadSettings).
+  if (settings.takeover || !settings.token || !settings.baseUrl) return null;
   try {
     return { endpoint: `${normaliseBaseUrl(settings.baseUrl)}/mcp`, token: settings.token };
   } catch {
@@ -577,6 +578,10 @@ const invoked = (() => {
 if (invoked) {
   const server = createToolServer({
     write: (m) => process.stdout.write(`${JSON.stringify(m)}\n`),
+    // Claude Code starts this server in the session's project folder: its settings are read there,
+    // so a folder's settings that would take the check over leave this server unconnected too
+    // (loadSettings' takeover; the Opus gate on 0.3.0-rc.6).
+    env: { ...process.env, CLAUDE_PROJECT_DIR: process.env.CLAUDE_PROJECT_DIR || process.cwd() },
     watchMs: Number(setting(process.env, 'TOOL_SERVER_WATCH_MS')) || WATCH_MS,
     retryMs: Number(setting(process.env, 'TOOL_SERVER_RETRY_MS')) || RETRY_MS,
   });

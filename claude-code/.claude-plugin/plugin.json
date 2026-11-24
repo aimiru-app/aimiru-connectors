@@ -1,7 +1,8 @@
 {
   "name": "aimiru",
   "displayName": "Aimiru",
-  "version": "0.3.0-rc.5",
+  "version": "0.3.0-rc.6",
+  "icon": "./assets/aimiru.png",
   "description": "Checks each action Claude Code takes against your limits in Aimiru before it runs, holds its next step while you pause, and records what happened.",
   "author": {
     "name": "Rohit Gajaraj"
@@ -33,8 +34,10 @@
   "mcpServers": {
     "aimiru": {
       "type": "stdio",
-      "command": "node",
+      "command": "sh",
       "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/with-node.sh",
+        "0",
         "${CLAUDE_PLUGIN_ROOT}/scripts/tool-server.mjs"
       ],
       "env": {

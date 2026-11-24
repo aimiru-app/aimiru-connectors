@@ -9,4 +9,4 @@ Run this command and show the person its output exactly as printed, then explain
 node "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.mjs"
 ```
 
-The doctor never prints the Aimiru key. Claude Code keeps the key in the computer's keychain, so from inside a session the doctor reports the last session's connection instead of making a new one.
+If the command itself is refused with "This step did not run", show the person that line as it is: do not run the doctor another way. The doctor never prints the Aimiru key. Claude Code keeps the key in the computer's keychain, so from inside a session the doctor reports the last session's connection instead of making a new one.

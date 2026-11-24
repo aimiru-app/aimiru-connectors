@@ -12,10 +12,11 @@ import { readKeyFile } from '../vendor/pair.mjs';
 import { createPauseWatch } from '../vendor/pause-watch.mjs';
 import { readSkillVersion } from '../vendor/routine.mjs';
 import { ASK_HOLD_MS, createPauseMemory, createAimiruClient, installSource, setting, sha256Hex } from '../vendor/aimiru-client.mjs';
-import { CLAUDE_CODE_CONNECT } from '../vendor/messages.mjs';
+import { CLAUDE_CODE_CONNECT, MESSAGES } from '../vendor/messages.mjs';
+import { settingsFiles } from './native-prompt.mjs';
 
 export const CONNECTOR = 'claude-code';
-export const VERSION = '0.3.0-rc.5';
+export const VERSION = '0.3.0-rc.6';
 /** onFailure: "block" makes a failed or timed-out check block the call (Claude Code 2.1.295, CHANGELOG). */
 export const MIN_ENFORCED_VERSION = '2.1.295';
 export const AGENT_LABEL = 'Claude Code';
@@ -418,6 +419,17 @@ export function connectAddressQuestion(url) {
   return `this connects Claude Code to the Aimiru at ${url}. Allow it only if that is the address your Aimiru shows.`;
 }
 
+/**
+ * Connected, the plugin's own connect (`/aimiru:connect --again`) makes a new key for whichever
+ * account taps Connect on the pairing page, and --email sends the request to that address's phone:
+ * the person's own yes in the session, naming the account when the command names one.
+ */
+export function connectAgainQuestion(email) {
+  return email
+    ? `this connects Claude Code again, for ${email}. Allow it only if you asked to connect it for that account.`
+    : "this connects Claude Code again, for the account Aimiru's page shows when it opens. Allow it only if you asked to connect it again.";
+}
+
 /** Characters an address, an email or a number may hold here: nothing a shell treats specially. */
 const PLAIN_ARG = /^[A-Za-z0-9@._:/+%=?-]+$/;
 
@@ -433,13 +445,14 @@ function plainArg(raw) {
  * `node "<plugin root>/scripts/connect.mjs"` with only its own options (--url, --email, --wait,
  * --again, or a bare address), `node "<plugin root>/scripts/doctor.mjs"` with none, or
  * `node "<plugin root>/scripts/activity.mjs"` with nothing, --off or --status.
- * Returns {script: 'connect' | 'doctor' | 'activity', url: string | null, off?: boolean, status?: true,
- * literal?: true} (literal: written with the unexpanded ${CLAUDE_PLUGIN_ROOT}), or null for anything
+ * Returns {script: 'connect' | 'doctor' | 'activity', url: string | null, email?: string, off?: boolean,
+ * status?: true, literal?: true} (email: connect's --email; literal: written with the unexpanded
+ * ${CLAUDE_PLUGIN_ROOT}), or null for anything
  * else: another program or path, a second command, a pipe or redirect, a variable or an
  * environment prefix. PreToolUse never asks Aimiru about the doctor command, or the activity command
  * turning the report on or saying whether it is on, connected or not (wave 10, snag 10), and lets
- * connect run while Claude Code is not connected yet, since it is how it gets connected; everything
- * else, `activity --off` included, is checked as before.
+ * connect run while Claude Code is not connected yet, since it is how it gets connected (connected,
+ * the person allows it in the session); everything else, `activity --off` included, is checked as before.
  */
 export function ownSetupCommand(command, pluginRoot) {
   if (typeof command !== 'string' || !pluginRoot || command.length > 1000) return null;
@@ -467,6 +480,7 @@ export function ownSetupCommand(command, pluginRoot) {
     return null;
   }
   let url = null;
+  let email = null;
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === '--again') continue;
@@ -478,6 +492,7 @@ export function ownSetupCommand(command, pluginRoot) {
         if (!/^https?:\/\//.test(v)) return null;
         url = v;
       }
+      if (a === '--email') email = v;
       i += 1;
       continue;
     }
@@ -488,14 +503,18 @@ export function ownSetupCommand(command, pluginRoot) {
     }
     return null;
   }
-  return { script, url, ...(literal ? { literal: true } : {}) };
+  return { script, url, ...(email ? { email } : {}), ...(literal ? { literal: true } : {}) };
 }
 
 /**
  * Reads the plugin's settings. The key arrives as CLAUDE_PLUGIN_OPTION_AGENT_KEY (userConfig
  * agent_key), or else from the key file /aimiru:connect saved, with the address it was made for.
+ * `takeover` is set while a folder's settings would hand the check to something else (takeoverOf):
+ * then makeClient sends nothing, and PreToolUse refuses every step. The project is the one Claude
+ * Code names (CLAUDE_PROJECT_DIR) unless `projectDir` names it; never the current folder by guess.
+ * `newProcess`: a session start that began a new Claude Code (takeoverOf).
  */
-export function loadSettings(env = process.env) {
+export function loadSettings(env = process.env, { projectDir = env.CLAUDE_PROJECT_DIR || null, workingDir = process.cwd(), newProcess = false } = {}) {
   const configuredToken = (env.CLAUDE_PLUGIN_OPTION_AGENT_KEY || setting(env, 'AGENT_TOKEN') || '').trim();
   const configuredUrl = (env.CLAUDE_PLUGIN_OPTION_AIMIRU_URL || setting(env, 'BASE_URL') || setting(env, 'URL') || '').trim();
   const dataDir = env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), '.aimiru', 'claude-code');
@@ -503,9 +522,23 @@ export function loadSettings(env = process.env) {
   const token = configuredToken || saved?.key || '';
   // A saved key belongs to the address it was made for.
   const baseUrl = saved ? saved.baseUrl || configuredUrl : configuredUrl;
+  let takeover = null;
+  try {
+    takeover = takeoverOf({ env, projectDir, workingDir, dataDir, newProcess });
+  } catch {
+    takeover = null;
+  }
+  let soft = null;
+  try {
+    soft = takeover ? null : folderSoft({ env, projectDir: projectDir || workingDir, workingDir });
+  } catch {
+    soft = null;
+  }
   return {
     token,
     baseUrl,
+    takeover,
+    folderSoft: soft,
     keySource: configuredToken ? 'settings' : saved ? 'file' : null,
     dataDir,
     projectDir: env.CLAUDE_PROJECT_DIR || null,
@@ -533,13 +566,18 @@ export function skillVersion(settings) {
 }
 
 export function makeClient(settings, { spool = true } = {}) {
+  // A folder's settings would take the check over (loadSettings' takeover): nothing goes anywhere,
+  // neither to the address they name nor with the person's own key.
+  const quiet = Boolean(settings.takeover);
   return createAimiruClient({
-    baseUrl: settings.baseUrl,
-    token: settings.token,
+    baseUrl: quiet ? '' : settings.baseUrl,
+    token: quiet ? '' : settings.token,
     connector: `${CONNECTOR}/${VERSION}`,
     agentLabel: AGENT_LABEL,
     // Not connected yet: the key the person was given first, pairing second (wave 10, snag 4).
     connect: CLAUDE_CODE_CONNECT,
+    // Claude Code asks the person itself when Aimiru says to confirm here (ADR-0320 change 4).
+    hostConfirm: true,
     spoolDir: spool ? settings.dataDir : undefined,
     timeouts: { checkMs: settings.checkTimeoutMs },
   });
@@ -1204,6 +1242,519 @@ export function supportsBlockOnFailure(version) {
  * of wk/connectors-flow). Settings that only shorten a wait or ask for more records stay free to change.
  */
 export const HIJACK_ENV_RE = /^(NODE_OPTIONS|NODE_PATH|CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_(OPTION_[A-Z0-9_]+|ROOT|DATA)|AIMIRU_(AGENT_TOKEN|BASE_URL|URL|PROJECT|CLAUDE_VERSION|CLAUDE_BIN|PLUGIN_[A-Z0-9_]+))$/i;
+
+// ---------------------------------------------------------------------------
+// A folder's settings that would take the check over (the Opus gate on 0.3.0-rc.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Claude Code gives every hook the `env` of the settings files it reads, a project's own
+ * .claude/settings.json and its local file included, and in `claude -p` with no trust asked
+ * (permissions reference, "What runs before you trust a folder", read 23 Nov 2026). So a repository
+ * could commit AIMIRU_AGENT_TOKEN and AIMIRU_BASE_URL there and send every check, with what it says
+ * and sometimes the person's own key, to a server of its own that allows anything (ADR-0312's
+ * takeover, still in 0.3.0-rc.5: loadSettings reads them before the saved key). A name
+ * HIJACK_ENV_RE covers, set in a project's or local settings file, is a takeover: every step is
+ * refused with the reason and nothing is sent anywhere. The person's own terminal, their user settings
+ * (~/.claude, or the folder CLAUDE_CONFIG_DIR names) and managed settings stay honoured, as the doctor
+ * says to set them there. Nor may a folder's settings route the check through a proxy or make it
+ * trust another certificate (FOLDER_NETWORK_RE; security review of rc.6). Two names stay free, since
+ * ordinary projects set them and neither changes the check (AGENTS.md, guards judged from the
+ * person's side): NODE_PATH, which Node's import of these .mjs files never reads, and a NODE_OPTIONS
+ * whose every option is one that changes only memory or warnings (safeNodeOptions); any other
+ * NODE_OPTIONS fails closed.
+ *
+ * A proxy is not refused from the person's own terminal or user settings: Node's fetch, which the
+ * client uses, goes through one only when NODE_USE_ENV_PROXY or --use-env-proxy says so, and people
+ * behind a company proxy need that to reach Aimiru at all. So the client keeps Node's default and only
+ * a folder's settings are kept from setting either.
+ */
+const FOLDER_NETWORK_RE = /^(HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|NODE_USE_ENV_PROXY|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|NODE_TLS_REJECT_UNAUTHORIZED)$/i;
+/**
+ * The home folder, which every path the check trusts hangs from (the data folder, ~/.claude, the
+ * exemption for the person's own files): a folder's settings may not move it (security review of
+ * rc.6: HOME="." made the project's own file read as the person's).
+ */
+const FOLDER_HOME_RE = /^(HOME|USERPROFILE|CLAUDE_PROJECT_DIR)$/i;
+/**
+ * What loads code into, or changes, a program before it runs: the loader's preloads and library
+ * paths, OpenSSL's configuration and modules, Node's compile cache and ICU data. with-node.sh never
+ * passes them to the check; refusing them from a folder's settings is the second layer, and the
+ * only one for a preload into the shell that starts it (security review of rc.6).
+ */
+const FOLDER_RUNTIME_RE = /^(LD_[A-Z0-9_]+|DYLD_[A-Z0-9_]+|OPENSSL_[A-Z0-9_]+|NODE_COMPILE_CACHE|NODE_ICU_DATA)$/i;
+
+/** The home folder by the computer's own account, never by the environment a folder's settings can set. */
+function realHome() {
+  try {
+    const h = os.userInfo().homedir;
+    if (h) return h;
+  } catch {
+    // no account entry: the environment's, as before
+  }
+  return os.homedir();
+}
+
+/**
+ * The options a folder's NODE_OPTIONS may hold, by name, with the value each takes (null: none).
+ * Each changes only memory, warnings or how errors read; none loads code, opens a port, writes a
+ * file, or changes how the check reaches Aimiru or whom it trusts.
+ */
+const SAFE_NODE_OPTIONS = new Map([
+  ['--max-old-space-size', /^\d{1,7}$/],
+  ['--max-semi-space-size', /^\d{1,7}$/],
+  ['--stack-size', /^\d{1,7}$/],
+  ['--max-http-header-size', /^\d{1,9}$/],
+  ['--dns-result-order', /^(ipv4first|ipv6first|verbatim)$/],
+  ['--unhandled-rejections', /^(strict|warn|none|throw|warn-with-error-code)$/],
+  ['--disable-warning', /^[A-Za-z0-9_-]{1,64}$/],
+  ['--enable-source-maps', null],
+  ['--no-warnings', null],
+  ['--no-deprecation', null],
+  ['--pending-deprecation', null],
+  ['--trace-warnings', null],
+  ['--trace-deprecation', null],
+  ['--trace-uncaught', null],
+]);
+
+/**
+ * NODE_OPTIONS split as Node splits it (src/node_options.cc, ParseNodeOptionsEnvVar): a space
+ * outside double quotes ends an option, a double quote opens or closes a quoted part, and inside one
+ * a backslash takes the next character as it is. Null where Node refuses the value (a quote never
+ * closed, a backslash at the end).
+ */
+export function nodeOptionsTokens(value) {
+  const s = String(value ?? '');
+  const out = [];
+  let quoted = false;
+  let fresh = true;
+  for (let i = 0; i < s.length; i += 1) {
+    let c = s[i];
+    if (c === '\\' && quoted) {
+      if (i + 1 === s.length) return null;
+      i += 1;
+      c = s[i];
+    } else if (c === ' ' && !quoted) {
+      fresh = true;
+      continue;
+    } else if (c === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (fresh) {
+      out.push(c);
+      fresh = false;
+    } else out[out.length - 1] += c;
+  }
+  return quoted ? null : out;
+}
+
+/** Whether every option in this NODE_OPTIONS is one SAFE_NODE_OPTIONS names, with a value it takes. */
+export function safeNodeOptions(value) {
+  const tokens = nodeOptionsTokens(value);
+  if (tokens === null) return false;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (!t.startsWith('--')) return false;
+    const eq = t.indexOf('=');
+    // Node reads _ and - alike in an option's name.
+    const name = `--${(eq === -1 ? t.slice(2) : t.slice(2, eq)).replace(/_/g, '-')}`;
+    if (!SAFE_NODE_OPTIONS.has(name)) return false;
+    const takes = SAFE_NODE_OPTIONS.get(name);
+    if (takes === null) {
+      if (eq !== -1) return false;
+      continue;
+    }
+    const v = eq === -1 ? tokens[(i += 1)] : t.slice(eq + 1);
+    if (typeof v !== 'string' || !takes.test(v)) return false;
+  }
+  return true;
+}
+
+/**
+ * How a name a project's or local settings file sets is judged (the final gate on rc.6: a guard stops
+ * only the harmful act):
+ *   'refuse'  every step is refused: it moves where the check looks or what it reads (Aimiru's key,
+ *             address or project, the plugin's own settings and folders, the home folder);
+ *   'drop'    with-node.sh keeps it out of the check, so the person's steps go on; Aimiru's own
+ *             commands, which Claude runs outside the check's environment with the key in hand, are
+ *             refused while it is set (folderSoft). That is a NODE_OPTIONS that loads code, OpenSSL,
+ *             Node's cache and ICU data, the macOS loader's DYLD_*, LD_* off Linux, and a proxy or
+ *             certificate setting with-node.sh left out;
+ *   null      free.
+ * Two kinds are refused after all: a proxy or certificate setting that reached the check anyway
+ * (with-node.sh did not see it in the file, say one written with an escape: its value is in this
+ * process's environment), and, on Linux, any LD_*, since the loader reads it for /bin/sh before
+ * with-node.sh can keep it out. ctx: {env, projectDir, platform}.
+ */
+export function folderNameRule(name, value, { env = {}, projectDir = null, platform = process.platform } = {}) {
+  if (typeof name !== 'string') return null;
+  if (FOLDER_HOME_RE.test(name)) return 'refuse';
+  if (FOLDER_NETWORK_RE.test(name)) return typeof env[name] === 'string' && env[name] === String(value ?? '') ? 'refuse' : 'drop';
+  // On Linux the loader reads LD_* (LD_AUDIT above all) for /bin/sh before with-node.sh can keep it
+  // out, whatever it names: refused there. The macOS loader never reads LD_*.
+  if (/^LD_/i.test(name)) return platform === 'linux' ? 'refuse' : 'drop';
+  if (FOLDER_RUNTIME_RE.test(name)) return 'drop';
+  if (!HIJACK_ENV_RE.test(name)) return null;
+  const upper = name.toUpperCase();
+  if (upper === 'NODE_PATH') return null;
+  if (upper === 'NODE_OPTIONS') return value !== undefined && value !== null && typeof value !== 'object' && safeNodeOptions(value) ? null : 'drop';
+  return 'refuse';
+}
+
+/** Whether a folder's settings may not set this name at all (folderNameRule 'refuse'). */
+export function takeoverName(name, value, ctx) {
+  return folderNameRule(name, value, ctx) === 'refuse';
+}
+
+
+/**
+ * A settings file's text read as JSON: {strict: true, json} when it is plain JSON, else {strict:
+ * false, json} read the way a looser reader would (comments, trailing commas), json null when even
+ * that fails. Claude Code's own reader may be looser than JSON.parse, so a file that is not plain JSON
+ * is never read as setting nothing (security review of rc.6).
+ */
+export function readSettingsText(raw) {
+  const text = String(raw ?? '');
+  try {
+    return { strict: true, json: JSON.parse(text) };
+  } catch {
+    // read it the looser way below
+  }
+  try {
+    return { strict: false, json: JSON.parse(withoutJsoncExtras(text)) };
+  } catch {
+    return { strict: false, json: null };
+  }
+}
+
+/** The text with comments and trailing commas outside strings taken out (JSON with comments). */
+function withoutJsoncExtras(text) {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (inString) {
+      out += c;
+      if (c === '\\') {
+        out += text[i + 1] ?? '';
+        i += 1;
+      } else if (c === '"') inString = false;
+    } else if (c === '"') {
+      inString = true;
+      out += c;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i += 1;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
+      i += 1;
+    } else out += c;
+  }
+  return out.replace(/,(\s*[}\]])/g, '$1');
+}
+
+/**
+ * Whether a settings file that is not strict JSON may set anything: true when, read the looser way, it
+ * has an env or pluginConfigs part, and when it cannot be read even that way, since then nothing can
+ * be ruled out (fail closed; no escapes are decoded by hand).
+ */
+function looseMaySet(read) {
+  if (read.strict) return false;
+  const obj = read.json;
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return true;
+  return Object.hasOwn(obj, 'env') || Object.hasOwn(obj, 'pluginConfigs');
+}
+
+/**
+ * The first project or local settings file of projectDir whose `env` sets a takeoverName, as
+ * {scope, file, names}, or null. A file that is missing or cannot be read is none (Claude Code cannot
+ * read it either); one that is not valid JSON is read for the names it writes as keys, so a looser
+ * reader than JSON.parse never hides one. The home folder's own ~/.claude files are the person's,
+ * never a folder's, even when the session starts in the home folder; that home is the computer
+ * account's (realHome), and a file that moves HOME is a takeover wherever it is. A file that sets
+ * Aimiru's plugin options (pluginConfigs, where Claude Code keeps what /plugin configure saved) is
+ * one too: those reach the hooks as CLAUDE_PLUGIN_OPTION_* (security review of rc.6).
+ */
+export function folderTakeover(o = {}) {
+  return scanFolder(o).takeover;
+}
+
+/** The names a folder's settings set that with-node.sh keeps out of the check ('drop'), as {file, names}, or null. */
+export function folderSoft(o = {}) {
+  return scanFolder(o).soft;
+}
+
+/**
+ * Both judgements of projectDir's settings and, when the session works in another folder (a moved
+ * CLAUDE_PROJECT_DIR, a /cd), the working folder's: {takeover, soft}.
+ */
+function scanFolder({ env = process.env, projectDir = null, workingDir = null, home = realHome(), platform = process.platform, readFile = (f) => fs.readFileSync(f, 'utf8') } = {}) {
+  const dirs = [...new Set([projectDir, workingDir].filter(Boolean).map((d) => path.resolve(d)))];
+  if (dirs.length === 0) return { takeover: null, soft: null };
+  const own = new Set(['settings.json', 'settings.local.json'].map((f) => path.resolve(home, '.claude', f)));
+  const seen = new Set();
+  let soft = null;
+  for (const dir of dirs) {
+    for (const { scope, file } of settingsFiles({ env, projectDir: dir, home, managed: [] })) {
+      if ((scope !== 'project' && scope !== 'local') || seen.has(path.resolve(file))) continue;
+      seen.add(path.resolve(file));
+      let raw;
+      try {
+        raw = String(readFile(file));
+      } catch {
+        continue;
+      }
+      const read = readSettingsText(raw);
+      const obj = read.json && typeof read.json === 'object' && !Array.isArray(read.json) ? read.json : null;
+      // Not strict JSON, with an env or pluginConfigs part or no way to tell: what it sets cannot be
+      // known for certain, so it is a takeover too, unless it is the person's own ~/.claude file.
+      if (looseMaySet(read)) {
+        if (own.has(path.resolve(file))) continue;
+        return { takeover: { scope, file, names: [], unclear: true }, soft };
+      }
+      const e = obj?.env && typeof obj.env === 'object' ? obj.env : {};
+      const ctx = { env, projectDir: dir, platform };
+      const names = Object.keys(e).filter((k) => folderNameRule(k, e[k], ctx) === 'refuse');
+      if (setsOurPluginOptions(obj?.pluginConfigs)) names.push('pluginConfigs');
+      // The person's own ~/.claude files, when the session starts in the home folder: theirs, unless
+      // they move the home folder itself.
+      if (own.has(path.resolve(file)) && !names.some((n) => FOLDER_HOME_RE.test(n))) continue;
+      if (names.length) return { takeover: { scope, file, names: [...new Set(names)].sort() }, soft };
+      const dropped = Object.keys(e).filter((k) => folderNameRule(k, e[k], ctx) === 'drop');
+      if (dropped.length && !soft) soft = { scope, file, names: [...new Set(dropped)].sort() };
+    }
+  }
+  return { takeover: null, soft };
+}
+
+/** Whether a settings file's pluginConfigs gives Aimiru's plugin, under any marketplace, options of its own. */
+function setsOurPluginOptions(configs) {
+  if (!configs || typeof configs !== 'object' || Array.isArray(configs)) return false;
+  return Object.entries(configs).some(
+    ([id, v]) =>
+      (id === PLUGIN_ID || AIMIRU_PLUGIN_NAMES.some((p) => id === p || id.startsWith(`${p}@`))) &&
+      v && typeof v === 'object' && v.options && typeof v.options === 'object' && Object.keys(v.options).length > 0,
+  );
+}
+
+/**
+ * What a takeover set, by a fingerprint of each value and the project it came from, so a file the
+ * person fixes mid-session does not hand the check back to the values this Claude Code still carries
+ * (Claude Code keeps the env it applied). Only a process whose env holds the same value is held by it;
+ * a new Claude Code started in that folder with its files clean forgets it (forgetTakeover).
+ */
+const TAKEOVER_FILE = 'folder-takeover.json';
+const TAKEOVER_KEEP = 50;
+const takeoverPrint = (value) => sha256Hex(`aimiru-folder-takeover:${value}`);
+
+function takeoverMemory(dataDir) {
+  const m = readJsonFile(path.join(dataDir, TAKEOVER_FILE));
+  return m && typeof m === 'object' && m.projects && typeof m.projects === 'object' ? m.projects : {};
+}
+
+function rememberTakeover(dataDir, projectDir, env, names) {
+  try {
+    const prints = {};
+    for (const n of names) if (typeof env[n] === 'string') prints[n] = takeoverPrint(env[n]);
+    if (Object.keys(prints).length === 0) return;
+    const projects = takeoverMemory(dataDir);
+    projects[path.resolve(projectDir)] = { names: prints, at: new Date().toISOString() };
+    const kept = Object.entries(projects)
+      .sort((a, b) => String(b[1]?.at ?? '').localeCompare(String(a[1]?.at ?? '')))
+      .slice(0, TAKEOVER_KEEP);
+    writeJsonFile(path.join(dataDir, TAKEOVER_FILE), { projects: Object.fromEntries(kept) });
+  } catch {
+    // the file itself still refuses every step while it sets them
+  }
+}
+
+/**
+ * The remembered names, when this env carries every one of them with the same value: the same Claude
+ * Code (or one started on purpose with the same values). One that carries only some, such as a new
+ * Claude Code with the same home folder and without the values a folder's file set, is not held.
+ */
+function rememberedTakeover(dataDir, projectDir, env) {
+  const entry = takeoverMemory(dataDir)[path.resolve(projectDir)];
+  if (!entry || typeof entry.names !== 'object' || entry.names === null) return null;
+  const prints = Object.entries(entry.names);
+  if (prints.length === 0) return null;
+  const all = prints.every(([n, print]) => typeof env[n] === 'string' && takeoverPrint(env[n]) === print);
+  return all ? prints.map(([n]) => n).sort() : null;
+}
+
+/** Forgets what projectDir's takeover set (takeoverOf, at a start that carries the same values). */
+export function forgetTakeover(dataDir, projectDir) {
+  try {
+    const projects = takeoverMemory(dataDir);
+    const key = path.resolve(projectDir);
+    if (!Object.hasOwn(projects, key)) return;
+    delete projects[key];
+    writeJsonFile(path.join(dataDir, TAKEOVER_FILE), { projects });
+  } catch {
+    // it is forgotten at the next start instead
+  }
+}
+
+/**
+ * The takeover this session is under, or null: {kind: 'file', scope, file, names} while a folder's
+ * settings file sets one, {kind: 'carried', names} while this Claude Code still carries what one set.
+ * `newProcess` (a session start that began a new Claude Code, with the folder's files clean): when it
+ * carries the same values, they came from the person's own terminal or settings this time, so the
+ * memory is forgotten and they are honoured; a start that does not carry them forgets nothing, so a
+ * Claude Code still running with them stays refused (security review of rc.6).
+ */
+export function takeoverOf({ env = process.env, projectDir = null, workingDir = null, dataDir, newProcess = false, home } = {}) {
+  if (!projectDir && !workingDir) return null;
+  projectDir = projectDir || workingDir;
+  const found = folderTakeover({ env, projectDir, workingDir, ...(home ? { home } : {}) });
+  if (found) {
+    // A file that cannot be read for certain may have set any of them: every name this Claude Code
+    // carries that a folder may not set (env is what with-node.sh passed, so only names that reach the
+    // check), home folder and Claude Code's own included. A later process is held by the memory only
+    // while it carries every one of them with the same values (rememberedTakeover).
+    const carried = found.unclear ? Object.keys(env).filter((k) => takeoverName(k, env[k], { env, projectDir })) : found.names;
+    if (dataDir) rememberTakeover(dataDir, projectDir, env, carried);
+    return { kind: 'file', ...found };
+  }
+  if (!dataDir) return null;
+  const remembered = rememberedTakeover(dataDir, projectDir, env);
+  if (!remembered) return null;
+  // A new Claude Code carrying every one of the values (from its own terminal or settings, the
+  // folder's files now clean): forgotten and honoured.
+  if (newProcess) {
+    forgetTakeover(dataDir, projectDir);
+    return null;
+  }
+  return { kind: 'carried', names: remembered };
+}
+
+/**
+ * What Claude reads about a takeover with each refused step, or, with `person`, the session's first
+ * line for the person: the file by its place in the project, the names, never a value.
+ */
+export function takeoverWords(takeover, projectDir = null, home = os.homedir(), { person = false } = {}) {
+  if (!takeover) return null;
+  if (takeover.kind === 'carried') return (person ? MESSAGES.folderTakeoverStillStart : MESSAGES.folderTakeoverStill)(takeover.names);
+  const file = path.resolve(takeover.file);
+  const rel = projectDir ? path.relative(path.resolve(projectDir), file) : null;
+  const shown = rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel : file.startsWith(path.resolve(home) + path.sep) ? `~${file.slice(path.resolve(home).length)}` : file;
+  if (takeover.unclear) return (person ? MESSAGES.folderUnclearStart : MESSAGES.folderUnclear)(shown);
+  if (takeover.kind === 'soft') return MESSAGES.folderOwnCommand(shown, takeover.names);
+  return (person ? MESSAGES.folderTakeoverStart : MESSAGES.folderTakeover)(shown, takeover.names);
+}
+
+/**
+ * The plugin's own commands (connect, doctor, activity, import) guard themselves at startup (the
+ * review of 3fd574e33): Claude runs them in its own environment, not the check's, and they read or
+ * send the person's key. While a folder's settings would take the check over, or set a name the check
+ * is kept from ('drop') that is in this process's environment, they read and send nothing. Returns
+ * the sentence to print, or null. From the person's own terminal a folder's settings do not apply,
+ * so nothing is in the environment and the command runs.
+ */
+export function ownCommandRefusal(env = process.env, { workingDir = process.cwd() } = {}) {
+  let settings;
+  try {
+    // A folder's proxy or certificate setting in this command's own environment is the case this
+    // guard is for (folderSoft, below), not a takeover of the check: judged without it here.
+    const judged = Object.fromEntries(Object.entries(env).filter(([k]) => !FOLDER_NETWORK_RE.test(k)));
+    settings = loadSettings(judged, { workingDir });
+  } catch {
+    return null;
+  }
+  const shownFrom = settings.projectDir || workingDir;
+  if (settings.takeover) return takeoverWords(settings.takeover, shownFrom, env.HOME || undefined, { person: true });
+  const soft = settings.folderSoft;
+  if (soft && soft.names.some((n) => typeof env[n] === 'string')) return takeoverWords({ kind: 'soft', ...soft }, shownFrom, env.HOME || undefined);
+  return null;
+}
+
+/**
+ * Whether this Bash step runs one of the plugin's own scripts (connect, doctor, activity, import...):
+ * Claude runs them in its own environment, not the check's, and they hold the person's key, so a
+ * folder's 'drop' settings (folderSoft) would reach them.
+ */
+export function runsOwnScript(toolName, command, pluginRoot) {
+  if (toolName !== 'Bash' || typeof command !== 'string') return false;
+  if (command.includes('${CLAUDE_PLUGIN_ROOT}/scripts/') || command.includes('$CLAUDE_PLUGIN_ROOT/scripts/')) return true;
+  return Boolean(pluginRoot) && command.includes(path.join(pluginRoot, 'scripts') + path.sep);
+}
+
+/**
+ * Where with-node.sh finds the Node.js a session start recorded: in the plugin's own installed copy,
+ * found from the file's own place (never from the environment, which a folder's settings can set),
+ * beside scripts/. with-node.sh checks it again itself before using it.
+ */
+export const NODE_PATH_FILE = '.node-path';
+/** The plugin's own folder, by this file's place: scripts/lib/runtime.mjs. */
+const OWN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/** Whether dir is inside a git working tree (a source checkout, whose files a commit can change). */
+function inGitTree(dir) {
+  let cur = path.resolve(dir);
+  for (let i = 0; i < 64; i += 1) {
+    if (fs.existsSync(path.join(cur, '.git'))) return true;
+    const up = path.dirname(cur);
+    if (up === cur) return false;
+    cur = up;
+  }
+  return false;
+}
+
+/** Whether `inner` is `outer` or inside it, by real places. */
+function within(inner, outer) {
+  return inner === outer || inner.startsWith(outer.endsWith(path.sep) ? outer : outer + path.sep);
+}
+
+/**
+ * Session start: records where this Node.js really is and its file's inode, so with-node.sh starts
+ * every later check with it rather than whatever a folder's PATH names first (security reviews of
+ * rc.6). Only in an installed copy of the plugin (never a source checkout, where a commit could write
+ * the record), outside the project, for a real file outside the project, /proc and /dev, and only
+ * while no project or local settings file sets PATH or is not strict JSON. Returns whether it recorded it.
+ */
+export function recordNodePath(settings, { execPath = process.execPath, root = OWN_ROOT, readFile = (f) => fs.readFileSync(f, 'utf8') } = {}) {
+  try {
+    const real = fs.realpathSync(execPath);
+    const realRoot = fs.realpathSync(root);
+    if (!path.isAbsolute(real) || /^\/(proc|dev)(\/|$)/.test(real) || inGitTree(realRoot)) return false;
+    if (settings.projectDir) {
+      const project = fs.realpathSync(settings.projectDir);
+      let home = null;
+      try {
+        home = fs.realpathSync(realHome());
+      } catch {
+        home = null;
+      }
+      if (project !== home && project !== path.parse(project).root && (within(real, project) || within(realRoot, project))) return false;
+      for (const { scope, file } of settingsFiles({ env: {}, projectDir: settings.projectDir, managed: [] })) {
+        if (scope !== 'project' && scope !== 'local') continue;
+        let raw;
+        try {
+          raw = String(readFile(file));
+        } catch {
+          continue;
+        }
+        const read = readSettingsText(raw);
+        if (!read.strict) return false;
+        const e = read.json?.env;
+        if (e && typeof e === 'object' && Object.keys(e).some((k) => k.toUpperCase() === 'PATH')) return false;
+      }
+    }
+    writeJsonFileRaw(path.join(realRoot, NODE_PATH_FILE), `${real}\t${fs.statSync(real).ino}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeJsonFileRaw(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, text, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
 
 /** True when these settings turn Aimiru off, or change how its check runs. */
 export function turnsAimiruOff(settingsJson) {

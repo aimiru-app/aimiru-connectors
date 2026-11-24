@@ -8,11 +8,20 @@
 // made from it (only an alert brings it to the person).
 //
 //   node scripts/connect.mjs [--url <Aimiru address>] [--email <your Aimiru email>] [--wait <seconds>] [--again]
+//                            [--ticket <the line's ticket>] [--from-session]
+//
+// --ticket: the start ticket from the line Aimiru's Connect screen copies (ADR-0261, ADR-0312); the
+// request shows up there and one Connect connects it. --from-session: run by connect-start.mjs at a
+// session start, with nothing opened and nobody to show a code to. With a ticket, from a session start
+// or not, it sends nothing when a key is known here, and pairs only with Aimiru's own address (the Opus
+// security gate of 23 Nov, M1, and its re-review).
 //
 // The address (addressOf): --url; else the request a run before this one kept, while it is worth a
 // poll; else the plugin's own setting, as Claude Code hands it to the hooks or keeps it in its
 // settings file (it hands it to no command Claude runs); else AIMIRU_BASE_URL; else the address the
-// saved key was made for; else Aimiru's own, https://aimiru.app.
+// saved key was made for; else Aimiru's own, https://aimiru.app. --again pairs only with the address
+// the saved key was made for, else Aimiru's own (againAddressOf), and refuses a --url naming another
+// (the Opus gate on 0.3.0-rc.6).
 //
 // One run waits as long as the request lasts, within the longest time limit Claude Code gives a
 // command (CONNECT_WAIT_S), saying each minute how long it has left; --wait makes it shorter.
@@ -27,14 +36,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENT_LABEL, CONNECTOR, VERSION, findDataDir, keyFilePath, loadSettings, makeClient, savedPluginOption } from './lib/runtime.mjs';
+import { AGENT_LABEL, CONNECTOR, VERSION, findDataDir, keyFilePath, loadSettings, makeClient, ownCommandRefusal, savedPluginOption } from './lib/runtime.mjs';
 import { openPage as openInBrowser } from './vendor/open-page.mjs';
 import {
+  CONNECT_TICKET,
   PAIR_MESSAGES,
   PRACTICE_WAIT_MS,
   dropPendingPairing,
+  deviceIdIn,
   pairAgent,
   pendingLasts,
+  readKeyFile,
   readPendingPairing,
   resumeFrom,
   waitForPractice,
@@ -44,6 +56,9 @@ import {
 import { normaliseBaseUrl, setting } from './vendor/aimiru-client.mjs';
 import { describeAsk, markAsked, readImportState } from './vendor/import-lines.mjs';
 import { refreshHelper } from './activity.mjs';
+import { accountEmailOf, readAccounts } from './vendor/account.mjs';
+import { MESSAGES } from './vendor/messages.mjs';
+import { keyKnown } from './lib/start-line.mjs';
 
 const PENDING_FILE = 'pairing.json';
 /** Aimiru's own address: where connect pairs when nothing names another (Mac run part 1, item 1). */
@@ -60,10 +75,12 @@ const REMIND_EVERY_MS = 60_000;
 const RUN_AGAIN = '/aimiru:connect';
 
 export function parseArgs(argv) {
-  const out = { url: null, email: null, waitS: null, again: false };
+  const out = { url: null, email: null, waitS: null, again: false, ticket: null, fromSession: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--again') out.again = true;
+    else if (a === '--ticket') out.ticket = argv[++i] ?? null;
+    else if (a === '--from-session') out.fromSession = true;
     else if (a === '--url') out.url = argv[++i] ?? null;
     else if (a === '--email') out.email = argv[++i] ?? null;
     else if (a === '--wait') out.waitS = Number(argv[++i]);
@@ -89,6 +106,31 @@ export function addressOf({ args, env, settings, pending, now = Date.now() }) {
   if (args.url) return args.url;
   if (pendingLasts(pending, now)) return pending.base_url;
   return env.CLAUDE_PLUGIN_OPTION_AIMIRU_URL || savedPluginOption(env, 'aimiru_url') || setting(env, 'BASE_URL') || setting(env, 'URL') || settings.baseUrl || DEFAULT_ADDRESS;
+}
+
+/**
+ * Where --again pairs (the Opus gate on 0.3.0-rc.6): the address the key saved in dataDir was made
+ * for, else Aimiru's own. Never --url, the environment, the plugin's settings or a kept request's
+ * address: connecting again moves every later step to whichever account taps Connect, so it stays
+ * with the Aimiru this computer was connected to.
+ */
+export function againAddressOf(dataDir) {
+  return readKeyFile(keyFilePath(dataDir))?.baseUrl || DEFAULT_ADDRESS;
+}
+
+/**
+ * The pairing page's link with the person's account as a sign-in hint (--email), so the page offers
+ * that account first. Only an address is added, never a key; a link it cannot read is left as it is.
+ */
+export function withSignInHint(url, email) {
+  if (!email || !/^[^\s@]+@[^\s@]+$/.test(email)) return url;
+  try {
+    const u = new URL(url);
+    u.searchParams.set('login_hint', email);
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -127,16 +169,42 @@ function stopped(stop) {
  * @returns {Promise<number>} exit code
  */
 export async function connect({ argv = process.argv.slice(2), env = process.env, say = (l) => process.stdout.write(`${l}\n`), fetch: fetchImpl, openPage = null, stop = null } = {}) {
+  // A folder's settings that would reach this command, which pairs and saves the key: nothing is sent.
+  const refusal = ownCommandRefusal(env);
+  if (refusal) {
+    say(refusal);
+    return 1;
+  }
   const args = parseArgs(argv);
   // Run by Claude from the skill, this has no CLAUDE_PLUGIN_DATA: the key goes where the hooks read it.
-  const settings = loadSettings({ ...env, CLAUDE_PLUGIN_DATA: findDataDir(env) });
+  const settings = loadSettings({ ...env, CLAUDE_PLUGIN_DATA: findDataDir(env) }, { workingDir: process.cwd() });
   const pendingFile = path.join(settings.dataDir, PENDING_FILE);
   const keyFile = keyFilePath(settings.dataDir);
   const waitS = waitSecondsOf(args, env);
   const t0 = Date.now();
 
+  // A line from the person's Connect screen (a ticket): the copied line hands it over in the
+  // environment, at a session start (connect-start.mjs); no person types --ticket, so whoever passes
+  // it here (an agent's own command, which the person is never asked about) gets the session start's
+  // rule (the Opus security gate of 23 Nov 2026, M1, and its re-review, S1/S4): nothing is sent when
+  // a key is known on this computer, and it pairs only with Aimiru's own address, never one from
+  // --url, the environment, the plugin's settings or a kept request (lib/start-line.mjs). To connect
+  // a computer that is connected already, the person types /aimiru:connect --again.
+  const lineMode = args.ticket !== null || args.fromSession;
+  const ticket = typeof args.ticket === 'string' && CONNECT_TICKET.test(args.ticket.trim()) ? args.ticket.trim() : null;
+  if (lineMode) {
+    if (!ticket) {
+      if (!args.fromSession) say(MESSAGES.lineNotOurs);
+      return args.fromSession ? 0 : 1;
+    }
+    if (keyKnown({ ...env, CLAUDE_PLUGIN_DATA: settings.dataDir })) {
+      if (!args.fromSession) say(MESSAGES.lineNotUsedConnected);
+      return 0;
+    }
+  }
+
   // Already connected with a key Aimiru still knows: nothing to do, unless asked again.
-  if (settings.token && !args.again) {
+  if (settings.token && !args.again && !ticket) {
     const client = makeClient(settings, { spool: false });
     if (client.configured) {
       const me = await client.me();
@@ -148,10 +216,49 @@ export async function connect({ argv = process.argv.slice(2), env = process.env,
     }
   }
 
+  // --again says which account Claude Code was connected for (a hint kept on this computer, or what
+  // Aimiru answers for the key it still holds), and how to choose another one. The page it opens
+  // always names the account the browser is on, and the person picks the number there.
+  let againBase = null;
+  if (args.again && !lineMode) {
+    try {
+      againBase = normaliseBaseUrl(againAddressOf(settings.dataDir));
+    } catch (e) {
+      say(PAIR_MESSAGES.badAddress(e.message));
+      return 1;
+    }
+    // An address given with --again is never used (againAddressOf): nothing is sent.
+    if (args.url) {
+      let named = null;
+      try {
+        named = normaliseBaseUrl(args.url);
+      } catch {
+        named = null;
+      }
+      if (named !== againBase) {
+        say(MESSAGES.connectAgainNoAddress(againBase));
+        return 1;
+      }
+    }
+  }
+  if (args.again) {
+    let was = readAccounts(env)['claude-code']?.email ?? null;
+    if (settings.token) {
+      try {
+        // Asked of the Aimiru this pairs with, never an address from the environment.
+        const client = makeClient(againBase ? { ...settings, baseUrl: againBase } : settings, { spool: false });
+        if (client.configured) was = accountEmailOf((await client.me({ timeoutMs: 3_000 })).data) ?? was;
+      } catch {
+        // the kept hint stands
+      }
+    }
+    say(MESSAGES.connectAgain(AGENT_LABEL, was));
+  }
+
   const pending = readPendingPairing(pendingFile);
   let base;
   try {
-    base = normaliseBaseUrl(addressOf({ args, env, settings, pending }));
+    base = normaliseBaseUrl(lineMode ? DEFAULT_ADDRESS : againBase ?? addressOf({ args, env, settings, pending }));
   } catch (e) {
     say(PAIR_MESSAGES.badAddress(e.message));
     say('Then run: /aimiru:connect --url <address>');
@@ -160,16 +267,20 @@ export async function connect({ argv = process.argv.slice(2), env = process.env,
 
   const result = await pairAgent({
     baseUrl: base,
-    agent: { name: AGENT_LABEL, kind: 'claudecode', host: os.hostname() },
+    agent: { name: AGENT_LABEL, kind: 'claudecode', host: os.hostname(), device: deviceIdIn(settings.dataDir) },
     connector: { name: CONNECTOR, version: VERSION },
     personEmail: args.email,
     say,
     maxWaitMs: waitS * 1000,
     resume: resumeFrom(pending, base),
     onStarted: (started) => writePendingPairing(pendingFile, started),
-    openPage: openPage || ((url) => openInBrowser(url, { baseUrl: base, env })),
-    remindEveryMs: REMIND_EVERY_MS,
+    // From a session start nothing opens: the person's own Connect screen shows the request.
+    openPage: args.fromSession ? null : (url) => (openPage || ((u) => openInBrowser(u, { baseUrl: base, env })))(withSignInHint(url, args.email)),
+    remindEveryMs: args.fromSession ? 0 : REMIND_EVERY_MS,
     signal: stop,
+    ticket,
+    // A session start has nobody to show a code to: a line that ran out says copy a new one.
+    fallbackWithoutTicket: !args.fromSession,
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
   });
 
@@ -195,6 +306,9 @@ export async function connect({ argv = process.argv.slice(2), env = process.env,
     say('The key in the plugin settings still wins over this one. Clear it with /plugin configure aimiru@aimiru to use the new key.');
   }
   say('Aimiru checks the next action Claude Code takes. The next session reports how it runs, which decides what Aimiru shows.');
+  // Connected from the Connect screen's line: Aimiru sent no practice request, and the import can
+  // wait for /aimiru:connect or the person's own /aimiru:import.
+  if (args.fromSession) return 0;
   // The practice request: within what is left of this run, never past a stop.
   const left = waitS * 1000 - (Date.now() - t0);
   const practice = waitForPractice({

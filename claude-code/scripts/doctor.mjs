@@ -23,15 +23,19 @@ import {
   compareVersions,
   detectClaudeCodeVersion,
   findDataDir,
+  folderTakeover,
   loadSettings,
   makeClient,
   skillVersion,
   stateStore,
+  ownCommandRefusal,
   takesJobsHere,
+  takeoverWords,
 } from './lib/runtime.mjs';
 import { PAUSE_TRACE_FILE, createSpool, isDemoEnded, readTrace } from './vendor/aimiru-client.mjs';
 import { CLAUDE_CODE_CONNECT, MESSAGES, clockOf, reachFinding, tierWord } from './vendor/messages.mjs';
 import { localReadsOn } from './vendor/local.mjs';
+import { accountEmailOf, accountsDisagree, rememberAccount } from './vendor/account.mjs';
 import { pauseHoldOn } from './vendor/pause-watch.mjs';
 import { readPermissionSettings, settingsFiles } from './lib/native-prompt.mjs';
 import { earlierInstalls } from './vendor/runner.mjs';
@@ -83,9 +87,26 @@ function subagentBriefLine({ given, last, reinstall }) {
 }
 
 async function main() {
+  // A folder's settings that would reach this command, which reads the key and asks Aimiru with it:
+  // it says so and reads nothing (the review of 3fd574e33).
+  const refusal = ownCommandRefusal(process.env);
+  if (refusal) {
+    process.stdout.write(`!! ${refusal}\n`);
+    return 1;
+  }
   // The data folder first: the key /aimiru:connect saved lives there (ADR-0034).
   // Claude Code sets CLAUDE_PLUGIN_DATA only for its own runs: find the folder the hooks use.
-  const settings = loadSettings({ ...process.env, CLAUDE_PLUGIN_DATA: findDataDir(process.env) });
+  const settings = loadSettings({ ...process.env, CLAUDE_PLUGIN_DATA: findDataDir(process.env) }, { workingDir: process.cwd() });
+
+  // A folder's settings that would take the check over (the Opus gate on 0.3.0-rc.6). In a session
+  // the hook refuses this doctor with the same words; from the person's own terminal it reads the
+  // folder they run it in, where Claude Code would read them.
+  const folder = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const takeover = settings.takeover ?? (() => {
+    const found = folderTakeover({ env: process.env, projectDir: folder });
+    return found ? { kind: 'file', ...found } : null;
+  })();
+  if (takeover) fix('folder_settings', takeoverWords(takeover, folder, undefined, { person: true }), 'Then run /aimiru:doctor again.');
 
   // 1. Node.js
   const nodeMajor = Number(process.versions.node.split('.')[0]);
@@ -142,6 +163,17 @@ async function main() {
         const agent = me.data?.agent || {};
         const tier = tierWord(agent.tier);
         ok('connection', `Connected to Aimiru as ${agent.name || 'this agent'}. Aimiru shows it as ${tier}.`);
+        // The account, in full (journey lane 2): the terminal is the person's own screen. When Codex on
+        // this computer reports to another account, both are named, since an ask for one never reaches
+        // the phone the other's person is holding.
+        const account = accountEmailOf(me.data);
+        if (account) {
+          ok('account', MESSAGES.accountLine(account));
+          rememberAccount(process.env, 'claude-code', AGENT_LABEL, account);
+          const apart = accountsDisagree(process.env, { connector: 'claude-code', agent: AGENT_LABEL, email: account });
+          if (apart.length) note('account_mismatch', `${MESSAGES.accountMismatch(apart)} To move one, run /aimiru:connect --again in Claude Code (or connect Codex again), and pick the same account on the page that opens.`);
+        }
+        if (me.data?.switch?.ends_at) note('switch', MESSAGES.switchWaits(me.data.switch.ends_at));
         if (me.data?.space?.paused) note('paused', 'Everything is paused in Aimiru. Nothing runs until you resume.');
         else if (agent.status === 'paused') note('paused', `${agent.name || 'This agent'} is paused in Aimiru. Nothing runs until you resume it.`);
         // Whether asks reach the person's phone (ADR-0033): a warning, never a failure.
