@@ -208,6 +208,8 @@ export const MESSAGES = Object.freeze({
 
   /** 409 or another answer that means "do not act". */
   doNotAct: 'Aimiru could not confirm this action, so it did not run.',
+  // The job this step named has ended (the person stopped it, or it finished): the run ends here (the server's own line).
+  jobClosed: 'This job has ended, so Aimiru refused this step. Stop here and do not try it another way. Tell your person what you finished and what you did not.',
 
   /**
    * Ask that was not answered in time, with Aimiru's own sentence about it when it sent one: that
@@ -741,6 +743,13 @@ export function jobPrompt(task) {
     // Inside codex exec nobody answers (agent-experience review): what Codex would say goes in its summary.
     "Do it in this folder. Aimiru checks each step as usual: when it holds or refuses one, say so in your summary in Aimiru's words, " +
       'and do not try to reach the same result another way. If the job needs the person\'s answer, stop and say what you need in your summary.',
+    // The write spike (27 Nov): in a runner's job nobody can say yes to a step, and Aimiru's hosted
+    // connector asks every agent to read the Pause first, which here only gets refused. Only a refusal
+    // by the agent's own app settings is carried past; Aimiru's Pause, hold or refusal stops the job
+    // (the agent-experience gate on rc.7: the runner does not end a run that is paused mid-job).
+    "Aimiru checks your steps itself, so this job needs none of Aimiru's own tools. " +
+      'Nobody is at this terminal to answer a prompt: if a step is refused, leave it out, say so in your summary, and carry on with the parts that do not need it. ' +
+      'If Aimiru holds a step for the person, says you are paused, or says the job has ended, stop there and end with your summary.',
     'When you finish, end with a short summary of what came of it, in a few plain lines. Aimiru gives that summary to the person as the result of the job.',
   ].join('\n');
 }

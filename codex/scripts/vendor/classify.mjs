@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { evidenceText, redactSecrets, shellEvidenceInput, truncate } from './aimiru-client.mjs';
 import { cartFacts, cleanId, linkSpendRequest, pageCheckoutIn, ucpOperation, ucpProtocol } from './checkout.mjs';
+import { PAUSE_TOOL_NAMES } from './pause-tools.mjs';
 
 /** Strongest first. When a command does several things, the strongest class wins. */
 export const CLASS_ORDER = Object.freeze(['spend', 'send', 'share', 'book', 'delete', 'login', 'write', 'other', 'read']);
@@ -7712,8 +7713,25 @@ export function splitMcpToolName(toolName) {
   return { server: m[1], tool: m[2] };
 }
 
-/** The tools Aimiru's own server offers (CONTRACT.md, "MCP"); get_answer is the eighth (ADR-0035), get_task the ninth (ADR-0060), propose the tenth (ADR-0057), and jobs with steps and Memory add six (ADR-0124, ADR-0125): sixteen. */
-export const AIMIRU_MCP_TOOLS = Object.freeze(['get_context', 'check', 'get_answer', 'request_approval', 'record', 'report_cant', 'take_task', 'pause_status', 'get_task', 'propose', 'start_job', 'add_step', 'get_job', 'complete_step', 'memory_read', 'memory_propose']);
+/**
+ * The tools Aimiru's own server offers (CONTRACT.md, "MCP"); get_answer is the eighth (ADR-0035), get_task the ninth (ADR-0060), propose the tenth (ADR-0057), and jobs with steps and Memory add six (ADR-0124, ADR-0125): sixteen. Pause both ways adds pause and request_resume (ADR-0361, the one definition in pause-tools.mjs): eighteen, so they run as Aimiru's own, never checked and never held by a Pause (request_resume never resumes; pause only holds agents back).
+ */
+export const AIMIRU_MCP_TOOLS = Object.freeze(['get_context', 'check', 'get_answer', 'request_approval', 'record', 'report_cant', 'take_task', 'pause_status', 'get_task', 'propose', 'start_job', 'add_step', 'get_job', 'complete_step', 'memory_read', 'memory_propose', ...PAUSE_TOOL_NAMES]);
+
+/**
+ * Which of Pause both ways (ADR-0361) a call names, on a tool server that carries Aimiru's name, or
+ * null: for a connector that cannot tell which server a call goes to (Codex and OpenClaw say only the
+ * name) and so answers these itself with its own key, never running the tool the name points at.
+ * @param {string} toolName  mcp__<server>__<tool> (Codex), or <server>__<tool> (OpenClaw)
+ * @returns {'pause'|'request_resume'|null}
+ */
+export function aimiruPauseToolOf(toolName) {
+  const name = String(toolName ?? '');
+  const plain = /^([A-Za-z0-9_.:-]+?)__([a-z_]+)$/.exec(name);
+  const parts = splitMcpToolName(name) ?? (plain ? { server: plain[1], tool: plain[2] } : null);
+  if (!parts || !/aimiru/i.test(parts.server)) return null;
+  return PAUSE_TOOL_NAMES.includes(parts.tool) ? parts.tool : null;
+}
 
 /**
  * The name Aimiru for Claude Code is installed under (claude-code/.claude-plugin/plugin.json). The

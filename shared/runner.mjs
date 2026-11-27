@@ -43,6 +43,12 @@ export const NOT_READY_MS = 60_000;
 export const BACKOFF_MAX_MS = 30_000;
 /** While a job runs, the runner tells Aimiru it is still on this often (busy: no second job). */
 export const BUSY_PING_MS = 20_000;
+/**
+ * While a job runs, the runner reads it in Aimiru this often (GET /v1/tasks/{id}, connectors 0.3.0-rc.7):
+ * once the person stopped it there, the run is ended (its stop reads "stopped"), so the agent given the
+ * rest never works in the same folder beside it.
+ */
+export const JOB_CHECK_MS = 10_000;
 /** A key Aimiru refused: looked at again after this, in case the person connected again. */
 export const RECONNECT_WAIT_MS = 5 * 60_000;
 /** Each take, and the last word when the runner stops. */
@@ -62,7 +68,9 @@ export const DEVICE_KINDS = Object.freeze(['MacBook', 'Mac', 'PC']);
 
 export const RUNNER_WORDS = Object.freeze({
   on: (device, dir) => `Runner on, ${device}. It starts the jobs you give your agents in Aimiru, in ${dir}.`,
-  onAgents: (labels) => (labels.length ? `It can start ${labels.join(' and ')} now.` : 'It cannot start an agent yet. Each one says why below.'),
+  /** `on` from another folder than the runner had: jobs move with it (the agent-experience gate on rc.7). */
+  moved: (from) => `Jobs no longer run in ${from}.`,
+  onAgents: (labels) => (labels.length ? `It can start ${labels.join(' and ')} now.` : 'It cannot start an agent yet. Each one says why above.'),
   offHow: (line) => `Turn it off any time in Aimiru, or here with: ${line}`,
   stays: 'It stays on after a restart, and it keeps the computer awake only while a job runs and only on power.',
   notStarted: (line) => `The runner did not start, so nothing will start your jobs yet. Try again in a few seconds with: ${line}`,
@@ -72,9 +80,9 @@ export const RUNNER_WORDS = Object.freeze({
   insideAgent: 'Start the runner yourself, in a terminal of your own. It does not start from inside an agent.',
   notPerson: 'Start the runner yourself, in a terminal of your own.',
   noConfig: (line) => `The runner is not set up on this computer. Turn it on with: ${line}`,
-  homeFolder: (dir) => `Pick a project folder, not ${dir}. Jobs run in the folder you choose.`,
+  homeFolder: (dir, line) => `Pick a project folder, not ${dir}. Jobs run in the folder you choose.${line ? ` Then run it there: ${line}` : ''}`,
   noFolder: (dir) => `There is no folder at ${dir}.`,
-  notGit: 'Pick a folder that is in git. Jobs run only in a project folder.',
+  notGit: (line) => `Pick a folder that is in git. Jobs run only in a project folder.${line ? ` Then run it there: ${line}` : ''}`,
   started: (device, dir) => `Runner on, ${device}, in ${dir}. Waiting for the jobs you give your agents in Aimiru.`,
   noAgents: 'No agent here can take a job yet. Set up Claude Code or Codex with Aimiru first.',
   ready: (label) => `${label} is ready to take your jobs.`,
@@ -268,10 +276,10 @@ export function checkFolder(dir, env = process.env) {
   return { ok: true, dir: d };
 }
 
-function folderWords(r) {
-  if (r.why === 'home') return RUNNER_WORDS.homeFolder(r.dir);
+function folderWords(r, line = null) {
+  if (r.why === 'home') return RUNNER_WORDS.homeFolder(r.dir, line);
   if (r.why === 'missing') return RUNNER_WORDS.noFolder(r.dir);
-  return RUNNER_WORDS.notGit;
+  return RUNNER_WORDS.notGit(line);
 }
 
 /** Text from outside (a job's words, an agent's) as a terminal shows it: one line, nothing that moves the cursor. */
@@ -585,8 +593,36 @@ export function createRunner(o) {
     setState(agent, 'running', RUNNER_WORDS.tookJob(agent.label));
     // Into the log, nothing the run prints: its notes name commands and files, and its last lines
     // are the result.
-    const done = await runWithPings(agent, () => agent.run({ task, dir: o.dir, print: toLog ? () => {} : print, stop, spawn }));
+    const done = await runWithPings(agent, (jobStop) => agent.run({ task, dir: o.dir, print: toLog ? () => {} : print, stop: jobStop, spawn }), task.id);
     sayEnding(agent, done);
+  }
+
+  /**
+   * Where a job stands in Aimiru now (GET /v1/tasks/{id}), on Aimiru's own word about this very task only:
+   * 'stopped' when the person stopped it (its task reads cancelled: lane D's job_task reads cancelled only
+   * for a job the person stopped, and a paused agent's task reads paused); 'ended' when the task completed
+   * or failed while it ran (any key holder can finish a task with a receipt, so that is never told as the
+   * person's stop: the Opus gate on rc.7); 'open' while it is taken; null for anything else (another task's
+   * answer, 423 or paused: a paused job is held, never stopped; a 404, 403, 429 or 5xx, no answer, a client
+   * without the read), so a running job is never ended on a guess.
+   */
+  async function jobState(agent, taskId) {
+    const client = agent.client;
+    if (!client || typeof client.getTask !== 'function') return null;
+    let r = null;
+    try {
+      r = await client.getTask(taskId, { timeoutMs: TAKE_TIMEOUT_MS });
+    } catch {
+      return null;
+    }
+    if (r?.ok) {
+      if (r.data?.task?.id !== taskId) return null;
+      const s = r.data.task.status;
+      if (s === 'cancelled') return 'stopped';
+      if (s === 'completed' || s === 'failed') return 'ended';
+      return s === 'taken' ? 'open' : null;
+    }
+    return null;
   }
 
   /**
@@ -594,16 +630,32 @@ export function createRunner(o) {
    * BUSY_PING_MS, which takes nothing (only to a door that knows runners; an older door would read
    * it as a take). Resolves to what the run resolved to.
    */
-  async function runWithPings(agent, start) {
+  async function runWithPings(agent, start, taskId = null) {
     const ended = new AbortController();
+    // The job's own stop: the runner's, or the person's in Aimiru (the job read closed while it runs).
+    const job = new AbortController();
+    const onRunnerStop = () => job.abort();
+    if (stop.aborted) job.abort();
+    else stop.addEventListener('abort', onRunnerStop, { once: true });
     // The run starts first; the pings follow it.
     let running;
     try {
-      running = Promise.resolve(start()).catch(() => {});
+      running = Promise.resolve(start(job.signal)).catch(() => {});
     } catch {
       // The connector's run records its own end; a throw here means it could not even start.
       running = Promise.resolve();
     }
+    const checks = (async () => {
+      // A take path whose client cannot read its job (an older connector) runs as before.
+      if (!taskId || typeof agent.client?.getTask !== 'function') return;
+      while (!ended.signal.aborted && !job.signal.aborted) {
+        await waitFor(JOB_CHECK_MS, ended.signal, o.sleep);
+        if (ended.signal.aborted) break;
+        const state = await jobState(agent, taskId);
+        // The reason goes with the stop: the person's (stopped) or Aimiru's end of the job (ended).
+        if ((state === 'stopped' || state === 'ended') && !ended.signal.aborted) job.abort(state);
+      }
+    })();
     const pings = (async () => {
       while (!ended.signal.aborted && knows.has(agent.connector)) {
         await waitFor(BUSY_PING_MS, ended.signal, o.sleep);
@@ -617,7 +669,9 @@ export function createRunner(o) {
     })();
     const done = await running;
     ended.abort();
+    stop.removeEventListener('abort', onRunnerStop);
     await pings;
+    await checks;
     return done;
   }
 
@@ -664,7 +718,7 @@ export function createRunner(o) {
       print(RUNNER_WORDS.goesOn(agent.label));
       setState(agent, 'running', RUNNER_WORDS.goesOn(agent.label));
     };
-    const done = await runWithPings(agent, () => agent.resume({ due, dir: o.dir, print: toLog ? () => {} : print, stop, spawn, started }));
+    const done = await runWithPings(agent, (jobStop) => agent.resume({ due, dir: o.dir, print: toLog ? () => {} : print, stop: jobStop, spawn, started }), typeof due?.task_id === 'string' ? due.task_id : null);
     sayEnding(agent, done);
     return done?.outcome !== 'skipped';
   }
@@ -1268,9 +1322,11 @@ export async function runnerMain(argv, o) {
     }
     const folder = checkFolder(typeof flags.dir === 'string' ? flags.dir : process.cwd(), env);
     if (!folder.ok) {
-      print(folderWords(folder));
+      print(folderWords(folder, line('on')));
       return 1;
     }
+    // Turned on again from another folder: jobs move with it, and the person is told where from.
+    const before = readConfig(env);
     // Only a copy of the connector exactly as it is installed here, where its check runs from.
     if (!copyMatchesInstalled({ copy: o.scriptsDir, connector: o.connector, env: withoutEmpty(env) }).ok) {
       print(RUNNER_WORDS.differs(CONNECTOR_LABELS[o.connector] ?? 'this agent'));
@@ -1294,6 +1350,7 @@ export async function runnerMain(argv, o) {
     if (codexBin && !setting(readyEnv, 'CODEX_BIN')) readyEnv.AIMIRU_CODEX_BIN = codexBin;
     const agents = await loadAgents({ env: readyEnv, own: path.join(f.app, 'lib', 'runner-agent.mjs'), importer: o.importer });
     print(RUNNER_WORDS.on(device, folder.dir));
+    if (before?.dir && path.resolve(before.dir) !== folder.dir) print(RUNNER_WORDS.moved(before.dir));
     const readyLabels = [];
     for (const a of agents) {
       const r = safeReady(a, folder.dir);

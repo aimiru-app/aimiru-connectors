@@ -133,6 +133,14 @@ async function main() {
   const settings = loadSettings();
   if (!settings.token || !settings.baseUrl) return;
   const store = stateStore(settings.dataDir, { secret: settings.token });
+  // The person typed again after Aimiru said the session's job had ended: from this prompt on, the session's
+  // steps name no job and go under the person's rules as an ordinary session (ADR-0377). Only a person's own
+  // prompt at a terminal does this; a runner's resume prompt (claude -p) never does, so the run stays refused.
+  if (isInteractive() && store.jobEndedDue(session)) {
+    store.clearSessionTask(session, store.sessionTask(session));
+    store.clearRegive(session);
+    store.clearJobEnded(session);
+  }
   // Only this session's own questions, still open here, whose step can be quoted back, and not one
   // whose yes already woke Claude (watch.mjs, CN10): each yes is offered once.
   const waiting = isInteractive() ? store.offerable({ session }).filter((e) => !store.woken(e.exceptionId)).slice(0, 3) : [];

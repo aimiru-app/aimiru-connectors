@@ -1,5 +1,13 @@
 # Changes to Aimiru for Claude Code
 
+## 0.3.0-rc.7 (pre-release, 28 Nov 2026)
+
+- When a job the runner started stops before it finishes, Claude Code sends Aimiru why, in one word of a fixed set: you stopped it, it went quiet for ten minutes with no step running and the runner ended it, it reached its usage limit (read only from Claude Code's own rate limit event, its result and its exit code together, with the reset time it gives), or it ended for another reason. Aimiru shows it, and your other agent can carry on from there, once Aimiru's own release reads them.
+- From this release on, Claude Code sends Aimiru the names of the files a job changed in your project and how many lines it added and removed, never what the files say. They are counted from a snapshot taken when the job starts, so another agent's changes you have not committed are never counted as Claude Code's. Nothing is committed and your own git index is not touched; git keeps the snapshot's copies of your files in the project's .git folder until its own cleanup removes them. No count is made where your project's git settings would start a program to read your files (a filter, a file watcher or a program git would run on its own), and git runs nothing of your project's own while it counts.
+- A job you stop in Aimiru ends on your computer within about ten seconds, so no two agents work in your folder at once, once Aimiru's own release reads it.
+- A job tells Claude Code that Aimiru checks its steps itself; that nobody is at the terminal, so a refused step is left out and said in its summary while it carries on with what does not need it; and that a step Aimiru holds for you, or a Pause, ends the job there.
+- What to do: `claude plugin marketplace update aimiru`, then `claude plugin update aimiru@aimiru`, and restart Claude Code. If the runner was on, run `node "<plugin>/scripts/runner.mjs" on` again.
+
 ## 0.3.0-rc.6 (pre-release, 23 Nov 2026)
 
 - Connect from one line you copy in Aimiru. It connects only a computer that is not connected yet, and only to aimiru.app.

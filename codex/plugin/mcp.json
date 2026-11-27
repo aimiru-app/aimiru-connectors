@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "aimiru": {
+      "type": "streamable-http",
+      "url": "https://aimiru.app/mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "cimd"
+            }
+          }
+        }
+      }
+    }
+  }
+}

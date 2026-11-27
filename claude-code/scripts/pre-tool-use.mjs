@@ -731,6 +731,9 @@ async function checkStep({ input, toolName, settings, store, client, holdOn }) {
     // computer heard before while Aimiru cannot answer now.
     if (d.reason === 'paused') return onPaused(d.explain || MESSAGES.paused);
     if (d.decision === 'deny') {
+      // The job this session named has ended: the session keeps naming it, so Aimiru refuses every later step of
+      // this turn too; the person's next prompt turns the session back into an ordinary one (ADR-0377).
+      if (d.code === 'job_closed') store.markJobEnded(input.session_id);
       deny(d.explain || MESSAGES.doNotAct);
       return;
     }

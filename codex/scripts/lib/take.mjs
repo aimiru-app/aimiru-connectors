@@ -30,6 +30,7 @@ import { personsOwnJob, redactSecrets, setting, sha256Hex, sleep, taskIdOf, trun
 import { appDirOf, codexSettingsFacts, entryTrust, findOurHook, hookKeyOf, isOurExactCheck } from './install.mjs';
 import { createProgress, noteForEvent } from './progress.mjs';
 import { followRefusals } from './refusals.mjs';
+import { QUIET_MS, codexStepIds, createChanges, createCodexEnd, createQuiet } from '../vendor/run-end.mjs';
 import { PACKAGE_NAME, loadSettings, makeClient, ranSinceInstall, stateStore } from './runtime.mjs';
 import { JOB_WORDS } from './words.mjs';
 
@@ -207,7 +208,7 @@ function oneLine(text, max = 200) {
  * Runs one job with `codex exec` and records its end. Resolves to {outcome, result, recorded}.
  * @param {object} o
  */
-export async function runJob({ task, dir, settings, env, client, print, spawn = spawnChild, stop = null, limitMs = RUN_LIMIT_MS }) {
+export async function runJob({ task, dir, settings, env, client, print, spawn = spawnChild, stop = null, limitMs = RUN_LIMIT_MS, quietMs = QUIET_MS, changes = null }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aimiru-take-'));
   const lastFile = path.join(tmp, 'last-message.txt');
   const progress = createProgress({
@@ -221,6 +222,28 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
   let tooLong = false;
   let stderrTail = '';
   let child;
+  // What the run changes in the project, from a snapshot taken before Codex starts (run-end.mjs): nothing
+  // committed, and only what changed while it ran, so another agent's uncommitted work is never Codex's.
+  const changed = changes ?? createChanges(dir, { env });
+  try {
+    changed.start();
+  } catch {
+    // no changed files are told, never a guess
+  }
+  // How the run ended, from Codex's own events (run-end.mjs), and the runner's quiet timer.
+  const reading = createCodexEnd();
+  let stuck = false;
+  const quiet = createQuiet({
+    quietMs,
+    onQuiet: () => {
+      stuck = true;
+      try {
+        child?.kill('SIGTERM');
+      } catch {
+        // already gone
+      }
+    },
+  });
   try {
     child = spawn(codexBinOf(env), execArgs({ dir, lastMessageFile: lastFile }), {
       cwd: dir,
@@ -247,12 +270,17 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
     });
     const lines = readline.createInterface({ input: child.stdout });
     lines.on('line', (line) => {
+      quiet.touch();
       let ev;
       try {
         ev = JSON.parse(line);
       } catch {
         return;
       }
+      reading.see(ev, Date.now());
+      const steps = codexStepIds(ev);
+      for (const id of steps.opened) quiet.opened(id);
+      for (const id of steps.closed) quiet.closed(id);
       if (ev?.type === 'thread.started' && typeof ev.thread_id === 'string' && !refusals) {
         refusals = followRefusals({ codexHome: settings.codexHome, sessionId: ev.thread_id, onRefusal: (text) => print(printable(text)) });
       }
@@ -262,8 +290,11 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
       if (note) progress.note(note);
     });
   }
+  // Ended by Aimiru (the runner read the job completed or failed there), not by the person.
+  let closed = false;
   const onStop = () => {
-    stopped = true;
+    if (stop?.reason === 'ended') closed = true;
+    else stopped = true;
     // A terminal's Ctrl+C reaches Codex too; anything else is passed on.
     try {
       child?.kill('SIGINT');
@@ -291,7 +322,9 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
     }, 10_000).unref();
   }, limitMs);
   const end = await ended;
+  const exitAt = Date.now();
   clearTimeout(limit);
+  quiet.stop();
   stop?.removeEventListener?.('abort', onStop);
   refusals?.stop();
   await progress.close();
@@ -303,8 +336,13 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
   }
   fs.rmSync(tmp, { recursive: true, force: true });
 
-  const finished = !end.error && end.code === 0 && !failure && !stopped && !tooLong;
+  // An error event alone is not the end: Codex retries after one (#60993), so a turn that then completed
+  // with exit 0 finished.
+  const failedTurn = Boolean(failure) && !(reading.completed && !reading.failedTurn);
+  const finished = !end.error && end.code === 0 && !failedTurn && !stopped && !closed && !tooLong && !stuck;
   const outcome = finished ? 'completed' : 'failed';
+  // The typed stop (run-end.mjs): the runner's own stop, its timers, else Codex's own signals.
+  const typedStop = finished ? null : (reading.stopOf({ exit: end, stopped, stuck: stuck || tooLong, exitAt }) ?? { why: 'ended' });
   let result;
   let said;
   if (finished) {
@@ -316,6 +354,15 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
   } else if (stopped) {
     result = 'The person stopped Codex before it finished.';
     said = JOB_WORDS.takeStopped;
+  } else if (closed) {
+    result = 'Aimiru ended this job before Codex finished, so the run was stopped.';
+    said = JOB_WORDS.takeFailed;
+  } else if (stuck) {
+    result = `Codex sent nothing for ${Math.round(quietMs / 60_000)} minutes, so the run was stopped before it finished.`;
+    said = JOB_WORDS.takeQuiet(Math.round(quietMs / 60_000));
+  } else if (typedStop?.why === 'limit') {
+    result = failure ? `Codex stopped at its usage limit before it finished.\n\n${failure}` : 'Codex stopped at its usage limit before it finished.';
+    said = JOB_WORDS.takeLimit;
   } else {
     // Codex's own event says why; what it printed on stderr stays on this terminal (security review).
     const why = failure || (end.error ? 'Codex could not start.' : 'Codex ended with an error before it finished.');
@@ -326,12 +373,22 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
   // Keys and cards out, then email addresses and phone numbers (legal, 30 Oct, item 7), before it is sent or kept to send.
   result = truncate(redactContacts(redactSecrets(result)), RESULT_MAX);
   const firstLine = oneLine(result.split('\n').find((l) => l.trim()) ?? '', 200);
+  // The files the run changed, measured once Codex has ended.
+  let files = null;
+  try {
+    files = changed.end() ?? null;
+  } catch {
+    files = null;
+  }
   const r = await client.record(
     {
       action_id: null,
       outcome,
       task_id: task.id,
       result,
+      // connectors 0.3.0-rc.7 (CONTRACT.md, POST /v1/receipts): why it stopped, and what it changed.
+      ...(typedStop ? { stopped: typedStop } : {}),
+      ...(files ? { changed: files } : {}),
       summary: `${finished ? 'Codex finished the job' : 'Codex did not finish the job'}: ${firstLine}`,
       // One key per job: a record sent again from the spool never ends the job twice.
       idempotency_key: `cx_take_${sha256Hex(task.id).slice(0, 40)}`,
@@ -341,7 +398,7 @@ export async function runJob({ task, dir, settings, env, client, print, spawn = 
   print(said);
   if (finished && firstLine) print(firstLine);
   if (!r.ok) print(JOB_WORDS.takeResultLater);
-  return { outcome, result, recorded: r.ok, spooled: r.spooled === true, stopped };
+  return { outcome, result, recorded: r.ok, spooled: r.spooled === true, stopped, stop: typedStop, changed: files };
 }
 
 /**

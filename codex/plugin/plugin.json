@@ -1,0 +1,44 @@
+{
+  "name": "aimiru",
+  "version": "0.1.0",
+  "description": "Aimiru is the one place your agents share a memory and a record: what they did, one short page about you, and a pause you can use. It checks none of an agent's steps here.",
+  "author": {
+    "name": "Rohit Gajaraj",
+    "email": "support@aimiru.app",
+    "url": "https://aimiru.app"
+  },
+  "homepage": "https://aimiru.app",
+  "keywords": [
+    "agents",
+    "memory",
+    "record",
+    "pause"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Aimiru",
+        "shortDescription": "One page every agent shares",
+        "longDescription": "Aimiru is the one place your agents share a memory and a record. It keeps one short page about you, which you read and correct, and one record of what each of your agents did, whoever made them. Add Aimiru to ChatGPT or Codex and the agent can tell Aimiru what it did, check whether you have paused your agents, read your page when you let it know you, record its answer for a step of a job you carried to it when you let it, and run one of Aimiru's five ready agents when you ask. Aimiru checks none of the agent's steps through this plugin and cannot stop them. It never sends, books, buys or reads your accounts through ChatGPT. What an agent reads of your page stays with it, and never a line you mark private. You can pause your agents and see everything they did in Aimiru.",
+        "developerName": "Aimiru",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "defaultPrompt": [
+          "Ask Aimiru whether I paused my agents.",
+          "Tell Aimiru what you did for me today.",
+          "Plan my week using what Aimiru knows about me."
+        ],
+        "brandColor": "#1A1A1A",
+        "composerIcon": "./assets/composer-icon.png",
+        "logo": "./assets/logo.png",
+        "websiteURL": "https://aimiru.app",
+        "supportURL": "https://aimiru.app/help/connect#support",
+        "privacyPolicyURL": "https://aimiru.app/privacy",
+        "termsOfServiceURL": "https://aimiru.app/terms"
+      }
+    }
+  }
+}

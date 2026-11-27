@@ -16,7 +16,7 @@ import { CLAUDE_CODE_CONNECT, MESSAGES } from '../vendor/messages.mjs';
 import { settingsFiles } from './native-prompt.mjs';
 
 export const CONNECTOR = 'claude-code';
-export const VERSION = '0.3.0-rc.6';
+export const VERSION = '0.3.0-rc.7';
 /** onFailure: "block" makes a failed or timed-out check block the call (Claude Code 2.1.295, CHANGELOG). */
 export const MIN_ENFORCED_VERSION = '2.1.295';
 export const AGENT_LABEL = 'Claude Code';
@@ -745,6 +745,8 @@ export function stateStore(dataDir, { secret = '' } = {}) {
   const sessionTaskFile = (session) => path.join(sessionTasksDir, `${sha256Hex(`task:${String(session ?? '')}`).slice(0, 40)}.json`);
   // A session /clear emptied while it held an open job: given again at its next prompt (ADR-0157).
   const regiveFile = (session) => path.join(sessionTasksDir, `${sha256Hex(`regive:${String(session ?? '')}`).slice(0, 40)}.flag`);
+  // Aimiru said the job this session names has ended: its steps stay refused until the person's next prompt.
+  const endedFile = (session) => path.join(sessionTasksDir, `${sha256Hex(`ended:${String(session ?? '')}`).slice(0, 40)}.flag`);
 
   return {
     dataDir,
@@ -810,6 +812,30 @@ export function stateStore(dataDir, { secret = '' } = {}) {
     },
     regiveDue(session) {
       return Boolean(session) && fs.existsSync(regiveFile(session));
+    },
+    /**
+     * Aimiru answered a step of this session "the job has ended" (ADR-0377): the session keeps naming that job,
+     * so every later step in the same turn is refused too, until the person types their next prompt. A flag only.
+     */
+    markJobEnded(session) {
+      if (!session) return;
+      try {
+        fs.mkdirSync(sessionTasksDir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(endedFile(session), String(Date.now()), { mode: 0o600 });
+      } catch {
+        // the session keeps its job until Claude records it or it ages out
+      }
+    },
+    jobEndedDue(session) {
+      return Boolean(session) && fs.existsSync(endedFile(session));
+    },
+    clearJobEnded(session) {
+      if (!session) return;
+      try {
+        fs.rmSync(endedFile(session), { force: true });
+      } catch {
+        // cleared at the next prompt
+      }
     },
     clearRegive(session) {
       if (!session) return;

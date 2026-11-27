@@ -10,6 +10,18 @@ import { loadSettings, makeClient } from './runtime.mjs';
 import { INSTALL_LINE, codexBinOf, notReadyText, readyToTake, runJob } from './take.mjs';
 import { JOB_WORDS } from './words.mjs';
 
+/**
+ * Why Codex cannot take a job yet, as the runner says it (the agent-experience gate on rc.7): the runner
+ * takes jobs by itself, so it never says that no job was taken or asks to run anything again.
+ */
+export function runnerText(r) {
+  if (!r || r.why === 'not_checked') return JOB_WORDS.runnerNotChecked('/hooks');
+  return notReadyText(r)
+    .replace(/^No job was taken, because /, '')
+    .replace(/^./, (c) => c.toUpperCase())
+    .replace(/,? then run this again\.$/, '. The runner starts jobs by itself once you have.');
+}
+
 /** The shape the shared runner reads (vendor/runner.mjs RUNNER_AGENT_VERSION). */
 export const RUNNER_AGENT = 1;
 
@@ -44,7 +56,7 @@ export function runnerAgent({ env = process.env } = {}) {
       if (!settings.token || !settings.baseUrl) return { ok: false, why: 'no_key', text: JOB_WORDS.takeNoKey(INSTALL_LINE) };
       if (!codexFound(env)) return { ok: false, why: 'no_codex', text: JOB_WORDS.takeNoCodex };
       const r = readyToTake(settings, { dir, env });
-      return r.ok ? { ok: true } : { ok: false, why: r.why, text: notReadyText(r) };
+      return r.ok ? { ok: true } : { ok: false, why: r.why, text: runnerText(r) };
     },
     get client() {
       return clientFor(loadSettings(env));

@@ -110,6 +110,8 @@ export const JOB_WORDS = Object.freeze({
   // trusted it while offline is told to let one more command run online.
   takeNotChecked: (command) =>
     `No job was taken, because Codex has not run Aimiru's check where it is now since it was installed, so it could run the job unchecked. ${trustHow(command)} Then let Codex run one command, and run this again. If you already trusted them, let Codex run one more command while online.`,
+  // The runner's own words for the same (the agent-experience gate on rc.7): it takes no job and asks for no rerun.
+  runnerNotChecked: (command) => `Codex has not run Aimiru's check yet. ${trustHow(command)} Then let Codex run one command. The runner starts jobs by itself once it has.`,
   // The settings file to change is passed in (quality review): Codex's own, or the project's.
   takeChecksOff: (file) => `No job was taken, because Codex's checks are turned off, so Codex would skip Aimiru. Turn them back on in ${file}, then run this again.`,
   takeProjectChecks: (file) => `No job was taken, because ${file} has a setting of its own for Codex's checks, which could turn Aimiru's off. Take that setting out, then run this again.`,
@@ -134,6 +136,8 @@ export const JOB_WORDS = Object.freeze({
   takeDone: 'Codex finished the job. Aimiru has its result.',
   takeFailed: 'Codex could not finish the job. Aimiru has what happened.',
   takeStopped: 'You stopped Codex before it finished. Aimiru has what happened.',
+  takeLimit: 'Codex stopped at its usage limit before it finished. Aimiru has what happened.',
+  takeQuiet: (minutes) => `Codex sent nothing for ${minutes} minutes, so the run was stopped. Aimiru has what happened.`,
   takeTooLong: (minutes) => `Codex was still working after ${minutes} minutes, so the run was stopped. Aimiru has what happened.`,
   takeResultLater: 'Aimiru could not be reached to take the result, so it is kept here and sent once Aimiru answers.',
   // take --watch.

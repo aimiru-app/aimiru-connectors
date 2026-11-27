@@ -54,6 +54,7 @@ import readline from 'node:readline';
 import { jobPrompt } from '../vendor/messages.mjs';
 import { redactContacts } from '../vendor/contacts.mjs';
 import { claudePluginInstall, createNotes, noteLine, printable, runnerHome } from '../vendor/runner.mjs';
+import { QUIET_MS, claudeStepIds, createChanges, createClaudeEnd, createQuiet } from '../vendor/run-end.mjs';
 import { redactSecrets, sha256Hex, truncate } from '../vendor/aimiru-client.mjs';
 import { settingsFiles } from './native-prompt.mjs';
 import { HIJACK_ENV_RE, LATE_YES_MS, MIN_ENFORCED_VERSION, claudeConfigDir, compareVersions, findDataDir, loadSettings, makeClient, stateStore, turnsAimiruOff } from './runtime.mjs';
@@ -164,6 +165,10 @@ export const CC_RUNNER_WORDS = Object.freeze({
   noYes: 'None of the steps this job waited on got your yes in time, so Claude Code did not go on with it, and they did not run.',
   timedOut: 'The questions this job waited on ended before Claude Code could go on with it, so the steps that waited did not run.',
   stoppedGoingOn: 'The runner stopped while Claude Code went on with this job, so Aimiru cannot say whether the steps that waited ran. Their record is under the job.',
+  // connectors 0.3.0-rc.7: the typed stop's own sentences, beside the ones above.
+  limit: 'Claude Code stopped at its usage limit before it finished.',
+  closed: 'Aimiru ended this job before Claude Code finished, so the runner stopped it.',
+  quiet: (minutes) => `Claude Code sent nothing for ${minutes} minutes, so the runner stopped it before it finished.`,
   stillWaiting: (n) => (n === 1 ? 'One step still waited for your answer when the job ended, so it did not run.' : `${n} steps still waited for your answer when the job ended, so they did not run.`),
 });
 
@@ -411,7 +416,7 @@ export function noteForEvent(ev, { dir = null } = {}) {
  * resumeJob), it goes on with the job's own session (sessionId) once, and always ends the job.
  * @param {object} o
  */
-export async function runJob({ task, dir, env, settings, client, print, spawn = spawnChild, stop = null, limitMs = RUN_LIMIT_MS, sessionId = randomUUID(), resume = null }) {
+export async function runJob({ task, dir, env, settings, client, print, spawn = spawnChild, stop = null, limitMs = RUN_LIMIT_MS, quietMs = QUIET_MS, sessionId = randomUUID(), resume = null, changes = null }) {
   // The plugin Claude Code must say it loaded (pluginLoaded). None installed: nothing is started.
   const install = claudePluginInstall(env);
   // Each check in this session names the job (ADR-0157): the record Claude Code's check reads. A
@@ -435,6 +440,28 @@ export async function runJob({ task, dir, env, settings, client, print, spawn = 
   // A job that was to go on (ADR-0172), started by Claude Code under another session's id instead.
   let otherSession = false;
   let child = null;
+  // What the run changes in the project, from a snapshot taken before Claude Code starts (run-end.mjs):
+  // nothing committed, and only what changed while it ran.
+  const changed = install ? (changes ?? createChanges(dir, { env })) : null;
+  try {
+    changed?.start();
+  } catch {
+    // no changed files are told, never a guess
+  }
+  // How the run ended, from Claude Code's own events (run-end.mjs), and the runner's quiet timer.
+  const reading = createClaudeEnd();
+  let stuck = false;
+  const quiet = createQuiet({
+    quietMs,
+    onQuiet: () => {
+      stuck = true;
+      try {
+        child?.kill('SIGTERM');
+      } catch {
+        // already gone
+      }
+    },
+  });
   if (install) {
     try {
       child = spawn(claudeBinOf(env), resume ? resumeArgs({ sessionId }) : claudeArgs({ sessionId }), { cwd: dir, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -467,12 +494,17 @@ export async function runJob({ task, dir, env, settings, client, print, spawn = 
     const lines = readline.createInterface({ input: child.stdout });
     lines.on('line', (line) => {
       if (unchecked) return;
+      quiet.touch();
       let ev;
       try {
         ev = JSON.parse(line);
       } catch {
         return;
       }
+      const steps = claudeStepIds(ev);
+      for (const id of steps.opened) quiet.opened(id);
+      for (const id of steps.closed) quiet.closed(id);
+      reading.see(ev);
       if (!checked) {
         // Proof before the first step: the init event names Aimiru's plugin where it is installed. A
         // job that goes on (ADR-0172) must be its own session, under the id the runner gave it, so
@@ -495,8 +527,11 @@ export async function runJob({ task, dir, env, settings, client, print, spawn = 
       if (note) notes.note(note);
     });
   }
+  // Ended by Aimiru (the runner read the job completed or failed there), not by the person.
+  let closed = false;
   const onStop = () => {
-    stopped = true;
+    if (stop?.reason === 'ended') closed = true;
+    else stopped = true;
     try {
       child?.kill('SIGINT');
     } catch {
@@ -524,12 +559,15 @@ export async function runJob({ task, dir, env, settings, client, print, spawn = 
   }, limitMs);
   const end = await ended;
   clearTimeout(limit);
+  quiet.stop();
   stop?.removeEventListener?.('abort', onStop);
   await notes.close();
 
   const said = typeof final?.result === 'string' ? final.result.trim() : '';
+  // The typed stop (run-end.mjs): the runner's own stop, its timers, else Claude Code's own signals.
+  const typedStop = unchecked ? { why: 'ended' } : reading.stopOf({ exit: end, stopped, stuck: stuck || tooLong });
   const denied = Array.isArray(final?.permission_denials) ? final.permission_denials.length : 0;
-  const finished = checked && !unchecked && !end.error && end.code === 0 && final !== null && final.is_error !== true && !stopped && !tooLong;
+  const finished = checked && !unchecked && !end.error && end.code === 0 && final !== null && final.is_error !== true && !stopped && !closed && !tooLong;
   // ADR-0172: a run that ended well while questions of its session are still open with the person is
   // not the job's end. The job waits for the answers, and goes on once when they are in (resumeJob).
   // A job that already went on once is never kept waiting again.
@@ -545,7 +583,10 @@ export async function runJob({ task, dir, env, settings, client, print, spawn = 
   else if (unchecked) result = otherSession ? CC_RUNNER_WORDS.newSession : CC_RUNNER_WORDS.notLoaded;
   else if (tooLong) result = `Claude Code was still working after ${Math.round(limitMs / 60_000)} minutes, so the run was stopped.`;
   else if (stopped) result = 'The person stopped Claude Code before it finished.';
+  else if (closed) result = CC_RUNNER_WORDS.closed;
+  else if (stuck) result = CC_RUNNER_WORDS.quiet(Math.round(quietMs / 60_000));
   else if (end.error) result = 'Claude Code could not start.';
+  else if (typedStop?.why === 'limit') result = said ? `${CC_RUNNER_WORDS.limit}\n\n${said}` : CC_RUNNER_WORDS.limit;
   else result = said ? `Claude Code ended before it finished.\n\n${said}` : 'Claude Code ended before it finished.';
   // A step asked about anew on the turn that went on (a changed call): refused at the hold, and the
   // job ends without it, never going on a second time (ADR-0172).
@@ -559,17 +600,27 @@ export async function runJob({ task, dir, env, settings, client, print, spawn = 
   }
   if (left > 0) result += `\n\n${CC_RUNNER_WORDS.stillWaiting(left)}`;
   else if (denied > 0 && !unchecked) {
-    result += `\n\nClaude Code was not allowed ${denied === 1 ? 'one step' : `${denied} steps`} here, since nobody was there to say yes. Your Claude Code settings decide what it may do on its own.`;
+    result += `\n\nClaude Code was not allowed ${denied === 1 ? 'one step' : `${denied} steps`} here, since nobody was there to say yes. Your Claude Code settings decide what it may do on its own: to let it change files in this project and run its tests by itself, list them as allowed in the project's .claude/settings.local.json.`;
   }
   // Keys and cards out, then email addresses and phone numbers (legal, 30 Oct, item 7), before it is sent or kept to send.
   result = truncate(redactContacts(redactSecrets(result)), RESULT_MAX);
   const firstLine = noteLine(result.split('\n').find((l) => l.trim()) ?? '');
+  // The files the run changed, measured once it has ended (never while Claude Code could still write).
+  let files = null;
+  try {
+    files = changed?.end() ?? null;
+  } catch {
+    files = null;
+  }
   const r = await client.record(
     {
       action_id: null,
       outcome: finished ? 'completed' : 'failed',
       task_id: task.id,
       result,
+      // connectors 0.3.0-rc.7 (CONTRACT.md, POST /v1/receipts): why it stopped, and what it changed.
+      ...(!finished ? { stopped: typedStop ?? { why: 'ended' } } : {}),
+      ...(files ? { changed: files } : {}),
       summary: `${finished ? 'Claude Code finished the job' : 'Claude Code did not finish the job'}: ${firstLine}`,
       // One key per job: a record sent again from the spool never ends the job twice.
       idempotency_key: `cc_run_${sha256Hex(task.id).slice(0, 40)}`,
@@ -579,7 +630,7 @@ export async function runJob({ task, dir, env, settings, client, print, spawn = 
   if (install) store.clearSessionTask(sessionId, task.id);
   print(finished ? CC_RUNNER_WORDS.done : CC_RUNNER_WORDS.notDone);
   if (firstLine) print(firstLine);
-  return { outcome: finished ? 'completed' : 'failed', result, recorded: r.ok, stopped, checked: checked && !unchecked, sessionId };
+  return { outcome: finished ? 'completed' : 'failed', result, recorded: r.ok, stopped, checked: checked && !unchecked, sessionId, stop: finished ? null : (typedStop ?? { why: 'ended' }), changed: files };
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,6 +1071,8 @@ export async function resumeJob({ due, dir, env, settings, client, print, spawn,
     return { outcome: 'failed', result: words, stopped: false, checked: false, sessionId: w.session_id };
   };
   if (w.resumed) return ended(CC_RUNNER_WORDS.stoppedGoingOn);
+  // Aimiru said this session's job has ended: a run never goes on with it (ADR-0377).
+  if (store.jobEndedDue(w.session_id)) return ended(CC_RUNNER_WORDS.notResumed);
   // Only the session whose own record names this job, in the folder it ran in.
   if (w.dir !== path.resolve(dir) || store.sessionTask(w.session_id) !== w.task_id) return ended(CC_RUNNER_WORDS.notResumed);
   // Read again here: a yes is used only while its kept question is still open on this computer.

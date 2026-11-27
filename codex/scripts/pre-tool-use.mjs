@@ -50,7 +50,7 @@ import { ASKS_TRACE_FILE, appendTrace, askHoldMs, isFailClosed, projectOf, quiet
 import { MESSAGES, clockOf, personSaidNo, waitWords, withName } from './vendor/messages.mjs';
 import { createLocalState, localDecision, localReadsOn, localRecord } from './vendor/local.mjs';
 import { ackOnce, holdCeilingMs, holdWhilePaused, pauseHoldOn, yesBeforeLastPause } from './vendor/pause-watch.mjs';
-import { NEW_PROGRAM_RESOURCE, makerProtectedPaths } from './vendor/classify.mjs';
+import { NEW_PROGRAM_RESOURCE, aimiruPauseToolOf, makerProtectedPaths } from './vendor/classify.mjs';
 import { namePushTarget, programInspector, sessionBaselineFor } from './vendor/newness.mjs';
 import { findOurHook } from './lib/install.mjs';
 import { programKeys, programStore, sameKeys, yesCovers } from './lib/programs.mjs';
@@ -317,6 +317,26 @@ async function main() {
     // Codex's own local tools change nothing outside Codex: no check, as Claude Code's read-only tools.
     if (isCodexLocalTool(toolName)) {
       fallback('allow');
+      await reporting;
+      return;
+    }
+    // Pause both ways (ADR-0361): a call to Aimiru's own request_resume or pause is answered here,
+    // with Codex's own key (POST /v1/pause/resume-ask, or POST /v1/pause), paused or not, so it never
+    // waits on a hold or on the person, even before this computer has heard of a Pause; the call
+    // itself is refused with Aimiru's line, which Codex gives the model to tell the person where to
+    // resume. Neither ever resumes anything. Codex does not say which tool server a call goes to, so
+    // the server the name points at is never run: one that only borrows Aimiru's name gets nothing.
+    const pauseTool = client.configured ? aimiruPauseToolOf(toolName) : null;
+    if (pauseTool) {
+      holdFromHere();
+      const ti = input?.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {};
+      const r =
+        pauseTool === 'request_resume'
+          ? await client.requestResume({ timeoutMs: Math.max(250, Math.min(8_000, left() - 500)) })
+          : await client.pauseAgents({ who: ti.who === 'me' ? 'me' : 'everyone' }, { timeoutMs: Math.max(250, Math.min(8_000, left() - 500)) });
+      // Aimiru's own line, on a 503 too (it says nothing changed and where to go); else the Pause's.
+      const said = typeof r.data?.line === 'string' ? r.data.line : null;
+      deny(said ?? (client.pausedLocally()?.explain || MESSAGES.unreachableNow));
       await reporting;
       return;
     }

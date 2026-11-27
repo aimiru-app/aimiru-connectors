@@ -1325,6 +1325,28 @@ export function createAimiruClient(opts = {}) {
   }
 
   /**
+   * POST /v1/pause (the pause tool, ADR-0361): the agent pauses for its person, everything (who
+   * everyone, the default) or only itself (who me). A Pause only holds agents back, so Aimiru acts at
+   * once; once it says paused, this connector remembers it, as from a read, and holds its next step.
+   * There is no argument that resumes. The answer: {state, who, paused, pause_at, line, resume_url}.
+   */
+  async function pauseAgents({ who } = {}, { timeoutMs } = {}) {
+    const body = who === 'me' ? { who: 'me' } : { who: 'everyone' };
+    const r = await request('POST', '/v1/pause', { body, timeoutMs: timeoutMs ?? timeouts.requestMs });
+    if (r.ok && r.data?.paused === true) pauseMemory.remember(typeof r.data.line === 'string' ? r.data.line : null);
+    return r;
+  }
+
+  /**
+   * POST /v1/pause/resume-ask (the request_resume tool, ADR-0361): asks the person, in Aimiru, to
+   * resume. It never resumes: the pause memory stays as it is until Aimiru says not paused. The
+   * answer: {state, whole_space, expires_at, until, line, resume_url}.
+   */
+  async function requestResume({ timeoutMs } = {}) {
+    return request('POST', '/v1/pause/resume-ask', { body: {}, timeoutMs: timeoutMs ?? timeouts.requestMs });
+  }
+
+  /**
    * A read another process of this connector made (its watcher's GET /v1/pause, ADR-0142) said this
    * agent is no longer paused: this process forgets the pause too. Aimiru's own answer, read through
    * the watcher's record of it, never a guess.
@@ -1597,6 +1619,8 @@ export function createAimiruClient(opts = {}) {
         reach: readReach(d.reach),
         reuse: d.reuse === 'next_try' || d.reuse === 'none' ? d.reuse : null,
         quietUntil: typeof d.person_quiet_until === 'string' && Number.isFinite(Date.parse(d.person_quiet_until)) ? d.person_quiet_until : null,
+        // Aimiru's own reason for a no, when it names one (job_closed: the job this step named has ended).
+        code: d.decision === 'deny' && typeof d.error?.code === 'string' && d.error.code ? d.error.code : null,
         ...base,
       };
     }
@@ -1616,6 +1640,8 @@ export function createAimiruClient(opts = {}) {
         case 403:
           return { decision: 'deny', reason: 'outside_grant', explain: explain || MESSAGES.outsideGrant, ...base };
         case 409:
+          // job_closed (an Aimiru before its 200 deny): the job this step named has ended; say so.
+          if (r.code === 'job_closed') return { decision: 'deny', reason: 'conflict', code: 'job_closed', explain: explain || MESSAGES.jobClosed, ...base };
           return { decision: 'deny', reason: 'conflict', explain: MESSAGES.doNotAct, ...base };
         case 429:
           return failByClass(action, 'rate_limited', MESSAGES.busy(cls), base);
@@ -1731,6 +1757,8 @@ export function createAimiruClient(opts = {}) {
     memoryPropose,
     pause,
     pauseAck,
+    pauseAgents,
+    requestResume,
     pausedLocally,
     rememberPause,
     forgetPause,
